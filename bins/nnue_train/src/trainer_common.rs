@@ -25,6 +25,9 @@ impl SaveQuantisedExport for nnue_format::LayerStackWeights {
             nnue_train::trainer::OutputFormat::Yaneuraou => {
                 nnue_format::save_yaneuraou(writer, self)
             }
+            nnue_train::trainer::OutputFormat::TanukiSfnnwoP1536 => {
+                nnue_format::save_tanuki_sfnnwop1536(writer, self)
+            }
         }
     }
 }
@@ -41,6 +44,10 @@ impl SaveQuantisedExport for nnue_format::SimpleWeights {
             nnue_train::trainer::OutputFormat::Yaneuraou => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "--output-format yaneuraou is supported only for the LayerStack architecture",
+            )),
+            nnue_train::trainer::OutputFormat::TanukiSfnnwoP1536 => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--output-format tanuki-sfnnwop1536 is supported only for the LayerStack architecture",
             )),
         }
     }

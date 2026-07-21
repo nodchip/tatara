@@ -607,6 +607,18 @@ pub(crate) enum OutputFormatArg {
     #[default]
     Tatara,
     Yaneuraou,
+    #[value(name = "tanuki-sfnnwop1536")]
+    TanukiSfnnwoP1536,
+}
+
+impl OutputFormatArg {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Tatara => "tatara",
+            Self::Yaneuraou => "yaneuraou",
+            Self::TanukiSfnnwoP1536 => "tanuki-sfnnwop1536",
+        }
+    }
 }
 
 impl From<OutputFormatArg> for nnue_train::trainer::OutputFormat {
@@ -614,6 +626,7 @@ impl From<OutputFormatArg> for nnue_train::trainer::OutputFormat {
         match value {
             OutputFormatArg::Tatara => Self::Tatara,
             OutputFormatArg::Yaneuraou => Self::Yaneuraou,
+            OutputFormatArg::TanukiSfnnwoP1536 => Self::TanukiSfnnwoP1536,
         }
     }
 }

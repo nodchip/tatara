@@ -378,6 +378,8 @@ pub enum OutputFormat {
     Tatara,
     /// YaneuraOu SFNNWithoutPsqt evaluation file。
     Yaneuraou,
+    /// Tanuki/Hakubishin の進行度 8 分割 SFNNWithoutPsqt evaluation file。
+    TanukiSfnnwoP1536,
 }
 
 /// 1 回の [`run`] に渡す training hyper-parameter 一式。

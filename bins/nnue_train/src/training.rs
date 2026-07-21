@@ -191,12 +191,63 @@ pub(crate) fn validate_output_format(
     output_format: OutputFormatArg,
     bucket_mode: BucketMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if output_format == OutputFormatArg::Yaneuraou && !matches!(bucket_mode, BucketMode::KingRank9)
-    {
-        return Err(
+    match output_format {
+        OutputFormatArg::Yaneuraou if !matches!(bucket_mode, BucketMode::KingRank9) => Err(
             "--output-format yaneuraou requires LayerStack --bucket-mode kingrank9; progress8kpabs routing is not representable in YaneuraOu SFNN"
                 .into(),
+        ),
+        OutputFormatArg::TanukiSfnnwoP1536
+            if !matches!(bucket_mode, BucketMode::Progress8KpAbs) =>
+        {
+            Err("--output-format tanuki-sfnnwop1536 requires LayerStack --bucket-mode progress8kpabs".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(any(feature = "gpu", test))]
+pub(crate) fn validate_tanuki_output_config(
+    cli: &Cli,
+    args: &LayerstackArgs,
+    feature_set: FeatureSetSpec,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.output_format != OutputFormatArg::TanukiSfnnwoP1536 {
+        return Ok(());
+    }
+    if feature_set != FeatureSet::HalfKaHmMerged.spec() {
+        return Err(
+            "--output-format tanuki-sfnnwop1536 requires --feature-set halfka-hm-merged".into(),
         );
+    }
+    if args.bucket_mode != "progress8kpabs" {
+        return Err(
+            "--output-format tanuki-sfnnwop1536 requires --bucket-mode progress8kpabs".into(),
+        );
+    }
+    if args.num_buckets != nnue_format::TANUKI_SFNNWOP1536_LAYER_STACKS {
+        return Err("--output-format tanuki-sfnnwop1536 requires --num-buckets 8".into());
+    }
+    if args.progress_coeff.is_none() {
+        return Err(
+            "--output-format tanuki-sfnnwop1536 requires --progress-coeff <progress.bin>".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "gpu", test))]
+pub(crate) fn validate_plain_sfnn_extensions(
+    output_format: OutputFormatArg,
+    psqt: bool,
+    threat: bool,
+    effect_bucket: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if output_format != OutputFormatArg::Tatara && (psqt || threat || effect_bucket) {
+        return Err(format!(
+            "--output-format {} supports plain LayerStack only; PSQT, threat-profile, and effect-bucket models are not representable",
+            output_format.as_str()
+        )
+        .into());
     }
     Ok(())
 }
@@ -351,14 +402,12 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         )?),
     };
     let effect_bucket_config = parse_effect_bucket_config(&layerstack.effect_bucket_config)?;
-    if cli.output_format == OutputFormatArg::Yaneuraou
-        && (layerstack.psqt || threat_profile.is_some() || effect_bucket_config.is_some())
-    {
-        return Err(
-            "--output-format yaneuraou supports plain LayerStack only; PSQT, threat-profile, and effect-bucket models are not representable in YaneuraOu SFNN"
-                .into(),
-        );
-    }
+    validate_plain_sfnn_extensions(
+        cli.output_format,
+        layerstack.psqt,
+        threat_profile.is_some(),
+        effect_bucket_config.is_some(),
+    )?;
     if threat_profile.is_some() && effect_bucket_config.is_some() {
         return Err("--effect-bucket is mutually exclusive with --threat-profile".into());
     }
@@ -428,6 +477,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
 
     let bucket_mode = validate_bucket_mode(layerstack)?;
     validate_output_format(cli.output_format, bucket_mode)?;
+    validate_tanuki_output_config(cli, layerstack, shared.feature_set)?;
     // per-group override flags は wd / lr_mult とも (指定時) finite かつ >= 0。lr_mult=0
     // はその group の radam 更新を無効化する opt-in (clamp と norm loss apply は lr_mult
     // 非依存に掛かる)、bias wd=0 と同様に許容する。
@@ -1114,10 +1164,12 @@ pub(crate) fn per_group_optim_overridden(cli: &Cli) -> bool {
 /// [`build_simple_init_spec`] が reject (simple に L1f 層は無い)。
 #[cfg(any(feature = "gpu", test))]
 pub(crate) fn reject_simple_unsupported_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.output_format == OutputFormatArg::Yaneuraou {
-        return Err(
-            "--output-format yaneuraou is supported only with the layerstack subcommand".into(),
-        );
+    if cli.output_format != OutputFormatArg::Tatara {
+        return Err(format!(
+            "--output-format {} is supported only with the layerstack subcommand",
+            cli.output_format.as_str()
+        )
+        .into());
     }
     if cli.eval_only || cli.threat_ablate.is_some() || cli.threat_norm_dump {
         return Err(

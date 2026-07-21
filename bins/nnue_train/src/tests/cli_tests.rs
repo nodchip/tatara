@@ -4,11 +4,13 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use nnue_format::{ArchKind, SimpleActivation};
+use shogi_features::FeatureSet;
 
 use crate::cli::*;
 use crate::training::{
     per_group_optim_flags, reject_simple_unsupported_flags, require_simple_win_rate_model,
-    validate_bucket_mode, validate_output_format,
+    validate_bucket_mode, validate_output_format, validate_plain_sfnn_extensions,
+    validate_tanuki_output_config,
 };
 
 use clap::CommandFactory;
@@ -268,6 +270,107 @@ fn yaneuraou_output_format_parses_and_simple_rejects_it() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("--bucket-mode kingrank9"));
+}
+
+fn validate_tanuki_argv(
+    layerstack_args: &[&str],
+    feature_set: FeatureSet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut argv = vec![
+        "nnue-train",
+        "--output-format",
+        "tanuki-sfnnwop1536",
+        "--feature-set",
+        feature_set.canonical_name(),
+        "layerstack",
+    ];
+    argv.extend_from_slice(layerstack_args);
+    let cli = Cli::try_parse_from(argv).expect("Tanuki argv should parse");
+    let ArchCommand::LayerStack(args) = &cli.arch else {
+        unreachable!("layerstack subcommand was requested")
+    };
+    validate_output_format(cli.output_format, validate_bucket_mode(args)?)?;
+    validate_tanuki_output_config(&cli, args, feature_set.spec())
+}
+
+#[test]
+fn tanuki_output_format_parses_and_simple_rejects_it() {
+    let cli = Cli::try_parse_from([
+        "nnue-train",
+        "--output-format",
+        "tanuki-sfnnwop1536",
+        "layerstack",
+    ])
+    .expect("Tanuki LayerStack output should parse");
+    assert_eq!(cli.output_format, OutputFormatArg::TanukiSfnnwoP1536);
+
+    let simple = simple_cli(&["--output-format", "tanuki-sfnnwop1536"]);
+    let error = reject_simple_unsupported_flags(&simple).unwrap_err();
+    assert!(error.to_string().contains("only with the layerstack"));
+}
+
+#[test]
+fn tanuki_output_requires_progress8kpabs_eight_buckets_and_coefficients() {
+    validate_tanuki_argv(
+        &[
+            "--bucket-mode",
+            "progress8kpabs",
+            "--num-buckets",
+            "8",
+            "--progress-coeff",
+            "progress.bin",
+        ],
+        FeatureSet::HalfKaHmMerged,
+    )
+    .expect("valid Tanuki output config");
+
+    for args in [
+        vec!["--bucket-mode", "kingrank9", "--num-buckets", "9"],
+        vec![
+            "--bucket-mode",
+            "progress8kpabs",
+            "--num-buckets",
+            "9",
+            "--progress-coeff",
+            "progress.bin",
+        ],
+        vec!["--bucket-mode", "progress8kpabs", "--num-buckets", "8"],
+    ] {
+        let error = validate_tanuki_argv(&args, FeatureSet::HalfKaHmMerged).unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    let error = validate_tanuki_argv(
+        &[
+            "--bucket-mode",
+            "progress8kpabs",
+            "--num-buckets",
+            "8",
+            "--progress-coeff",
+            "progress.bin",
+        ],
+        FeatureSet::HalfKp,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("halfka-hm-merged"));
+}
+
+#[test]
+fn sfnn_outputs_reject_non_plain_layerstack_extensions() {
+    for output_format in [
+        OutputFormatArg::Yaneuraou,
+        OutputFormatArg::TanukiSfnnwoP1536,
+    ] {
+        for (psqt, threat, effect) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let error =
+                validate_plain_sfnn_extensions(output_format, psqt, threat, effect).unwrap_err();
+            assert!(error.to_string().contains("plain LayerStack"));
+        }
+    }
 }
 
 fn layerstack_args(argv: &[&str]) -> LayerstackArgs {
