@@ -37,6 +37,50 @@ cargo run --release -p nnue-trainer -- \
 エラーにする。学習 config から bucket routing mode を判定できるため、この経路では
 `--assume-kingrank9` は不要。
 
+## 現行 Hakubishin 向け Tanuki SFNNwoP1536 を直接出力
+
+`hakubishin-private` の既定 `YANEURAOU_ENGINE_NNUE_SFNNwoP1536` 構成は、
+HalfKA_hm merged feature と進行度別 8 LayerStack を使う。この構成向けには
+`--output-format tanuki-sfnnwop1536` を指定し、変換を挟まず推論用 `.bin` を出力する。
+
+```powershell
+target\release\nnue-train.exe `
+  --data D:\training_data\shuffled.bin `
+  --output D:\nnue\tanuki-run --net-id tanuki-run `
+  --output-format tanuki-sfnnwop1536 `
+  --feature-set halfka-hm-merged `
+  --superbatches 400 --threads 16 `
+  --scale 600 --win-rate-model `
+  --wrm-in-scaling 340 --wrm-nnue2score 600 `
+  layerstack `
+  --bucket-mode progress8kpabs --num-buckets 8 `
+  --progress-coeff C:\home\nodchip\hakubishin-private\source\progress.bin `
+  --ft-out 768 --l1 8 --l2 32
+```
+
+`--ft-out 768 --l1 8 --l2 32` は現行の既定 Hakubishin build に合わせた例であり、
+出力形式自体の固定条件ではない。tatara が通常受理する別の層次元でも出力できるが、
+読み込み側を同じ次元で build する必要がある。FT factorizer は export 時に実 feature
+行へ fold されるため利用できる。一方、PSQT、Threat、EffectBucket、Simple はこの形式
+では表現できない。
+
+出力は `D:\nnue\tanuki-run\tanuki-run-<superbatch>.bin`。使用するファイルを
+Hakubishin の `EvalDir` 配下へ `nn.bin` として置き、学習に使ったものと同一の
+`progress.bin` を `ProgressFilePath` に指定する。この形式の最終層は nnue-pytorch と
+同じ固定係数 16 向けに量子化されるため、現行 Hakubishin の USI 既定値 24 のままにせず
+次を設定する。
+
+```text
+setoption name EvalDir value eval
+setoption name ProgressFilePath value C:\home\nodchip\hakubishin-private\source\progress.bin
+setoption name FV_SCALE value 16
+isready
+```
+
+WRM を使う場合、net 出力の尺度と最終層量子化を一致させるため `--scale` と
+`--wrm-nnue2score` は同じ値にする。`tanuki-sfnnwop1536` はこの不一致を起動時に拒否する。
+WRM を使わない場合も `--scale` は sigmoid loss と最終層量子化の両方に使われる。
+
 ## `net_from_yo` — YaneuraOu → tatara
 
 `net_to_yo` の逆変換。YaneuraOu 形式で export された SFNN 評価ファイルを tatara の

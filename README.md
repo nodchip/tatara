@@ -153,8 +153,9 @@ For building the kernels and running the smoke test, see
 - [Arch string](docs/arch-string.md) — how the architecture-description string
   embedded in the quantised `.bin` header is assembled and checked at load time
   (Japanese only)
-- [Converting between tatara and YaneuraOu LayerStack nets](docs/net-to-yaneuraou.md) —
-  `net_to_yo` / `net_from_yo` usage, supported architecture, and binary layout (Japanese only)
+- [YaneuraOu and Hakubishin-compatible LayerStack output](docs/net-to-yaneuraou.md) —
+  `net_to_yo` / `net_from_yo`, KingRank9 direct export, and the dedicated
+  eight-stack `tanuki-sfnnwop1536` format (Japanese only)
 
 ## Using the trained net
 
@@ -164,7 +165,11 @@ SCReLU / Pairwise activations are specific to this project, so other shogi
 engines such as YaneuraOu cannot necessarily load it as-is; depending on the
 architecture, some nets need additional inference code before they can be
 loaded. A supported LayerStack net can be converted to and from the YaneuraOu
-format with [`net_to_yo` / `net_from_yo`](docs/net-to-yaneuraou.md).
+KingRank9 format with [`net_to_yo` / `net_from_yo`](docs/net-to-yaneuraou.md).
+The current Hakubishin eight-stack progress-routed architecture can instead be
+targeted directly with `--output-format tanuki-sfnnwop1536`; the same guide
+documents its feature, bucket, `progress.bin`, dimension, and `FV_SCALE`
+contract.
 Pre-trained reference nets are attached to the
 [GitHub Releases](https://github.com/SH11235/tatara/releases). To train your
 own net, see the [setup guide](docs/setup.md).

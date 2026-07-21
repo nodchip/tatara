@@ -159,6 +159,13 @@ horizon を持つ LR schedule では、checkpoint に解決済 horizon が保存
 ([学習した net の使い方](../README.ja.md#学習した-net-の使い方) 参照)。棋力検証は
 エンジンに組み込んで測定する。
 
+例外として、plain LayerStack は専用の `--output-format` でエンジン互換形式を直接
+出力できる。KingRank9 の YaneuraOu SFNN には `yaneuraou`、現行 Hakubishin の
+進行度 8 LayerStack には `tanuki-sfnnwop1536` を使う。後者の完全な学習コマンド、
+次元の扱い、同一 `progress.bin` と `FV_SCALE=16` の設定は
+[YaneuraOu / Hakubishin 互換出力](net-to-yaneuraou.md#現行-hakubishin-向け-tanuki-sfnnwop1536-を直接出力)
+を参照。
+
 ## 動作確認 (smoke)
 
 データ準備前に GPU 経路だけ確認したい場合は、アーキ サブコマンドを付けて
@@ -200,3 +207,4 @@ target/release/nnue-train --data <PSV> \
 - [held-out validation](held-out-validation.ja.md) — `test_loss` / `test_acc` の有効化と指標の読み方
 - [学習スケジュール](training-schedule.ja.md) — 学習率と WDL lambda のスケジューリング
 - [WRM loss のチューニング](wrm-loss-tuning.ja.md) — WRM の変換式と調整引数 (勝率変換 + loss の一般化)
+- [YaneuraOu / Hakubishin 互換出力](net-to-yaneuraou.md) — KingRank9 と Tanuki SFNNwoP1536 の出力条件
