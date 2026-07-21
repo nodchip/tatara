@@ -28,4 +28,7 @@ pub use halfka_psqt::{FT_OUT_DIM, HalfKAPsqtNet, L1_OUT_DIM, NUM_FEATURES, Quant
 pub use header::{DEFAULT_FV_SCALE, DEFAULT_QA, DEFAULT_QB, HEADER_BYTES, NET_ID_LEN, NnueHeader};
 pub use layerstack_weights::LayerStackWeights;
 pub use simple_weights::{SimpleActivation, SimpleId, SimpleWeights};
-pub use yaneuraou::{YANEURAOU_LAYER_STACKS, save_yaneuraou};
+pub use yaneuraou::{
+    TANUKI_SFNNWOP1536_LAYER_STACKS, YANEURAOU_LAYER_STACKS, save_tanuki_sfnnwop1536,
+    save_yaneuraou,
+};

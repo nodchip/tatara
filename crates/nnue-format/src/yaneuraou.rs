@@ -14,6 +14,8 @@ const YO_NETWORK_HASH: u32 = 0x6333_718a;
 
 /// YaneuraOu SFNN が要求する KingRank9 LayerStack 数。
 pub const YANEURAOU_LAYER_STACKS: usize = 9;
+/// Tanuki SFNNwoP1536 が要求する進行度別 LayerStack 数。
+pub const TANUKI_SFNNWOP1536_LAYER_STACKS: usize = 8;
 
 const MAX_FT_OUT: usize = 8192;
 const MAX_HIDDEN_DIM: usize = 4096;
@@ -59,8 +61,59 @@ const YO_FEATURES: [YoFeature; 5] = [
 /// bucket routing mode 自体は weights に含まれないため、caller は学習 config 等から
 /// KingRank9 であることを確認してから呼ぶ必要がある。
 pub fn save_yaneuraou<W: Write>(writer: &mut W, weights: &LayerStackWeights) -> io::Result<()> {
-    let arch = architecture(weights)?;
-    validate_weights(&arch, weights)?;
+    save_sfnn(writer, weights, SfnnProfile::Yaneuraou)
+}
+
+/// LayerStack weights を Tanuki SFNNwoP1536 互換形式で書き出す。
+///
+/// 現行 Tanuki/Hakubishin 構成に合わせて HalfKA_hm merged feature と 8 個の
+/// LayerStack を要求する。各層の次元はファイル形式では固定しない。
+pub fn save_tanuki_sfnnwop1536<W: Write>(
+    writer: &mut W,
+    weights: &LayerStackWeights,
+) -> io::Result<()> {
+    save_sfnn(writer, weights, SfnnProfile::TanukiSfnnwoP1536)
+}
+
+#[derive(Clone, Copy)]
+enum SfnnProfile {
+    Yaneuraou,
+    TanukiSfnnwoP1536,
+}
+
+impl SfnnProfile {
+    fn layer_stacks(self) -> usize {
+        match self {
+            Self::Yaneuraou => YANEURAOU_LAYER_STACKS,
+            Self::TanukiSfnnwoP1536 => TANUKI_SFNNWOP1536_LAYER_STACKS,
+        }
+    }
+
+    fn architecture_string(self, arch: &Architecture) -> String {
+        match self {
+            Self::Yaneuraou => yaneuraou_arch_string(arch),
+            Self::TanukiSfnnwoP1536 => {
+                "Network trained with https://github.com/official-stockfish/nnue-pytorch"
+                    .to_string()
+            }
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Yaneuraou => "YaneuraOu SFNN",
+            Self::TanukiSfnnwoP1536 => "Tanuki SFNNwoP1536",
+        }
+    }
+}
+
+fn save_sfnn<W: Write>(
+    writer: &mut W,
+    weights: &LayerStackWeights,
+    profile: SfnnProfile,
+) -> io::Result<()> {
+    let arch = architecture(weights, profile)?;
+    validate_weights(&arch, weights, profile)?;
 
     let ft_out = arch.ft_out;
     let l1_out = arch.l1_out;
@@ -69,7 +122,7 @@ pub fn save_yaneuraou<W: Write>(writer: &mut W, weights: &LayerStackWeights) -> 
 
     write_u32(writer, YO_VERSION)?;
     write_u32(writer, YO_TOP_HASH)?;
-    let arch_string = arch_string(&arch);
+    let arch_string = profile.architecture_string(&arch);
     write_u32(
         writer,
         u32::try_from(arch_string.len()).expect("architecture string length fits in u32"),
@@ -80,7 +133,7 @@ pub fn save_yaneuraou<W: Write>(writer: &mut W, weights: &LayerStackWeights) -> 
     write_leb128_tensor_i16(writer, &quantize_i16(&weights.ft_b, QA as f64))?;
     write_leb128_tensor_i16(writer, &quantize_i16(&weights.ft_w, QA as f64))?;
 
-    for bucket in 0..YANEURAOU_LAYER_STACKS {
+    for bucket in 0..profile.layer_stacks() {
         write_u32(writer, YO_NETWORK_HASH)?;
 
         // factorizer 共有項は通常 export 前に L1 へ fold 済み。未 fold の weights を
@@ -121,7 +174,7 @@ struct Architecture {
     l2_out: usize,
 }
 
-fn architecture(weights: &LayerStackWeights) -> io::Result<Architecture> {
+fn architecture(weights: &LayerStackWeights, profile: SfnnProfile) -> io::Result<Architecture> {
     let feature_set = FeatureSet::ALL
         .into_iter()
         .find(|feature_set| feature_set.spec() == weights.feature_set)
@@ -129,10 +182,16 @@ fn architecture(weights: &LayerStackWeights) -> io::Result<Architecture> {
     let ft_out = weights.ft_b.len();
     let l1_out = weights.l1f_b.len();
     let num_buckets = weights.num_buckets;
-    if num_buckets != YANEURAOU_LAYER_STACKS {
+    let layer_stacks = profile.layer_stacks();
+    if num_buckets != layer_stacks {
         return invalid_input(format!(
-            "YaneuraOu SFNN requires {} LayerStacks (KingRank9), but weights have {num_buckets} buckets",
-            YANEURAOU_LAYER_STACKS
+            "{} requires {layer_stacks} LayerStacks{}, but weights have {num_buckets} buckets",
+            profile.name(),
+            if matches!(profile, SfnnProfile::Yaneuraou) {
+                " (KingRank9)"
+            } else {
+                ""
+            }
         ));
     }
     let l2_out = weights.l2_b.len().checked_div(num_buckets).unwrap_or(0);
@@ -144,7 +203,7 @@ fn architecture(weights: &LayerStackWeights) -> io::Result<Architecture> {
     })
 }
 
-fn arch_string(arch: &Architecture) -> String {
+fn yaneuraou_arch_string(arch: &Architecture) -> String {
     let feature = YO_FEATURES
         .iter()
         .find(|feature| feature.feature_set == arch.feature_set)
@@ -170,7 +229,16 @@ fn arch_string(arch: &Architecture) -> String {
     )
 }
 
-fn validate_weights(arch: &Architecture, weights: &LayerStackWeights) -> io::Result<()> {
+fn validate_weights(
+    arch: &Architecture,
+    weights: &LayerStackWeights,
+    profile: SfnnProfile,
+) -> io::Result<()> {
+    if matches!(profile, SfnnProfile::TanukiSfnnwoP1536)
+        && arch.feature_set != FeatureSet::HalfKaHmMerged
+    {
+        return invalid_input("Tanuki SFNNwoP1536 requires HalfKaHmMerged features");
+    }
     if weights.psqt_w.is_some() {
         return invalid_input("PSQT models are not representable in YaneuraOu SFNN");
     }
@@ -194,37 +262,26 @@ fn validate_weights(arch: &Architecture, weights: &LayerStackWeights) -> io::Res
     }
     let l2_in = (arch.l1_out - 1) * 2;
     let spec = arch.feature_set.spec();
+    let layer_stacks = profile.layer_stacks();
     let lengths = [
         ("ft_b", weights.ft_b.len(), arch.ft_out),
         ("ft_w", weights.ft_w.len(), spec.ft_in() * arch.ft_out),
-        (
-            "l1_b",
-            weights.l1_b.len(),
-            YANEURAOU_LAYER_STACKS * arch.l1_out,
-        ),
+        ("l1_b", weights.l1_b.len(), layer_stacks * arch.l1_out),
         (
             "l1_w",
             weights.l1_w.len(),
-            YANEURAOU_LAYER_STACKS * arch.l1_out * arch.ft_out,
+            layer_stacks * arch.l1_out * arch.ft_out,
         ),
         ("l1f_b", weights.l1f_b.len(), arch.l1_out),
         ("l1f_w", weights.l1f_w.len(), arch.ft_out * arch.l1_out),
-        (
-            "l2_b",
-            weights.l2_b.len(),
-            YANEURAOU_LAYER_STACKS * arch.l2_out,
-        ),
-        ("l3_b", weights.l3_b.len(), YANEURAOU_LAYER_STACKS),
+        ("l2_b", weights.l2_b.len(), layer_stacks * arch.l2_out),
+        ("l3_b", weights.l3_b.len(), layer_stacks),
         (
             "l2_w",
             weights.l2_w.len(),
-            YANEURAOU_LAYER_STACKS * arch.l2_out * l2_in,
+            layer_stacks * arch.l2_out * l2_in,
         ),
-        (
-            "l3_w",
-            weights.l3_w.len(),
-            YANEURAOU_LAYER_STACKS * arch.l2_out,
-        ),
+        ("l3_w", weights.l3_w.len(), layer_stacks * arch.l2_out),
     ];
     for (name, actual, expected) in lengths {
         if actual != expected {
@@ -310,6 +367,104 @@ fn invalid_input_err(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
 
+    fn read_u32_test(reader: &mut impl std::io::Read) -> u32 {
+        let mut bytes = [0; 4];
+        reader.read_exact(&mut bytes).unwrap();
+        u32::from_le_bytes(bytes)
+    }
+
+    #[test]
+    fn tanuki_profile_writes_expected_header_and_exactly_eight_networks() {
+        use std::io::{Cursor, Read};
+
+        let weights = LayerStackWeights::zeroed(
+            FeatureSet::HalfKaHmMerged.spec(),
+            128,
+            4,
+            3,
+            TANUKI_SFNNWOP1536_LAYER_STACKS,
+        );
+        let mut bytes = Vec::new();
+        save_tanuki_sfnnwop1536(&mut bytes, &weights).unwrap();
+
+        let mut cursor = Cursor::new(bytes.as_slice());
+        assert_eq!(read_u32_test(&mut cursor), YO_VERSION);
+        assert_eq!(read_u32_test(&mut cursor), YO_TOP_HASH);
+        let arch_len = read_u32_test(&mut cursor) as usize;
+        let mut arch = vec![0; arch_len];
+        cursor.read_exact(&mut arch).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&arch).unwrap(),
+            "Network trained with https://github.com/official-stockfish/nnue-pytorch"
+        );
+        assert_eq!(read_u32_test(&mut cursor), YO_FT_HASH);
+        crate::layerstack_weights::read_leb128_tensor_i16(&mut cursor, Some(128)).unwrap();
+        crate::layerstack_weights::read_leb128_tensor_i16(
+            &mut cursor,
+            Some(FeatureSet::HalfKaHmMerged.spec().ft_in() * 128),
+        )
+        .unwrap();
+
+        let l1_out = 4usize;
+        let l2_out = 3usize;
+        let dense_bytes = l1_out * 4
+            + l1_out * 128usize.div_ceil(32) * 32
+            + l2_out * 4
+            + l2_out * ((l1_out - 1) * 2).div_ceil(32) * 32
+            + 4
+            + l2_out.div_ceil(32) * 32;
+        for _ in 0..TANUKI_SFNNWOP1536_LAYER_STACKS {
+            assert_eq!(read_u32_test(&mut cursor), YO_NETWORK_HASH);
+            cursor.set_position(cursor.position() + dense_bytes as u64);
+        }
+        assert_eq!(cursor.position() as usize, bytes.len());
+    }
+
+    #[test]
+    fn tanuki_profile_accepts_variable_valid_dimensions() {
+        for (ft_out, l1_out, l2_out) in [(128, 2, 2), (256, 7, 16), (768, 8, 32)] {
+            let weights = LayerStackWeights::zeroed(
+                FeatureSet::HalfKaHmMerged.spec(),
+                ft_out,
+                l1_out,
+                l2_out,
+                TANUKI_SFNNWOP1536_LAYER_STACKS,
+            );
+            save_tanuki_sfnnwop1536(&mut Vec::new(), &weights).unwrap();
+        }
+    }
+
+    #[test]
+    fn tanuki_profile_rejects_wrong_feature_or_bucket_count() {
+        let wrong_feature = LayerStackWeights::zeroed(
+            FeatureSet::HalfKp.spec(),
+            128,
+            4,
+            3,
+            TANUKI_SFNNWOP1536_LAYER_STACKS,
+        );
+        assert!(
+            save_tanuki_sfnnwop1536(&mut Vec::new(), &wrong_feature)
+                .unwrap_err()
+                .to_string()
+                .contains("HalfKaHmMerged")
+        );
+
+        let wrong_buckets = LayerStackWeights::zeroed(
+            FeatureSet::HalfKaHmMerged.spec(),
+            128,
+            4,
+            3,
+            YANEURAOU_LAYER_STACKS,
+        );
+        assert!(
+            save_tanuki_sfnnwop1536(&mut Vec::new(), &wrong_buckets)
+                .unwrap_err()
+                .to_string()
+                .contains("8 LayerStacks")
+        );
+    }
+
     #[test]
     fn baseline_architecture_string_matches_yaneuraou() {
         let weights = LayerStackWeights::zeroed(
@@ -320,7 +475,7 @@ mod tests {
             YANEURAOU_LAYER_STACKS,
         );
         assert_eq!(
-            arch_string(&architecture(&weights).unwrap()),
+            yaneuraou_arch_string(&architecture(&weights, SfnnProfile::Yaneuraou).unwrap()),
             "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->1536x2],Network=SFNN-1536{LayerStack=9}"
         );
     }
@@ -366,7 +521,10 @@ mod tests {
                 l2_out,
                 YANEURAOU_LAYER_STACKS,
             );
-            assert_eq!(arch_string(&architecture(&weights).unwrap()), expected);
+            assert_eq!(
+                yaneuraou_arch_string(&architecture(&weights, SfnnProfile::Yaneuraou).unwrap()),
+                expected
+            );
         }
     }
 
