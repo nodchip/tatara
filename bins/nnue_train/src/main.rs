@@ -66,7 +66,8 @@ pub(crate) use kernels::*;
 
 #[cfg(feature = "gpu")]
 fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    cli.normalize_empty_resume();
     // 診断 flag (--eval-only / --threat-ablate / --threat-norm-dump) は学習データを
     // 読まない経路 (norm-dump / --test-data 評価) を持つため、--data 不在でも
     // run_training に dispatch する。--data の有無だけで分けると、これらを指定しても

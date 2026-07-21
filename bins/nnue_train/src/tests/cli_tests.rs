@@ -27,6 +27,46 @@ fn cli_definition_is_valid() {
     Cli::command().debug_assert();
 }
 
+#[test]
+fn empty_resume_is_normalized_to_absent_before_or_after_subcommand() {
+    for argv in [
+        vec!["nnue-train", "--resume", "", "layerstack"],
+        vec!["nnue-train", "layerstack", "--resume", ""],
+    ] {
+        let mut cli = Cli::try_parse_from(argv).expect("empty resume should parse");
+        cli.normalize_empty_resume();
+        assert!(cli.resume.is_none());
+    }
+}
+
+#[test]
+fn non_empty_resume_path_is_preserved() {
+    let mut cli = Cli::try_parse_from([
+        "nnue-train",
+        "--resume",
+        "checkpoints/run-20.ckpt",
+        "layerstack",
+    ])
+    .expect("non-empty resume should parse");
+
+    cli.normalize_empty_resume();
+
+    assert_eq!(
+        cli.resume.as_deref(),
+        Some(std::path::Path::new("checkpoints/run-20.ckpt"))
+    );
+}
+
+#[test]
+fn whitespace_only_resume_path_is_preserved() {
+    let mut cli = Cli::try_parse_from(["nnue-train", "--resume", " ", "layerstack"])
+        .expect("whitespace resume should parse");
+
+    cli.normalize_empty_resume();
+
+    assert_eq!(cli.resume.as_deref(), Some(std::path::Path::new(" ")));
+}
+
 /// `--ft-factorize` / `--no-ft-factorize` は global flag。任意 subcommand の後ろに
 /// 付けても global 引数として parse される (層は `simple` でも `layerstack` でも同じ)。
 fn cli_with_factorize(argv: &[&str]) -> Cli {

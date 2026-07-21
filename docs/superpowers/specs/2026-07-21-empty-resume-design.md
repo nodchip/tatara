@@ -16,11 +16,14 @@ Non-empty checkpoint paths must retain the existing resume behavior.
 
 ## Implementation
 
-Keep the existing `Option<PathBuf>` CLI field. Add a small normalization method
-on `Cli` and call it immediately after Clap parses the process arguments. This
-keeps every downstream consumer consistent: mutual-exclusion validation,
-checkpoint loading, start-superbatch selection, experiment naming, and lineage
-all continue to use `None` for a fresh run without adding local empty-path checks.
+Keep the existing `Option<PathBuf>` CLI field. Override Clap's default
+`PathBufValueParser`, which rejects empty values before parsing completes, with
+an `OsStringValueParser` mapped to `PathBuf`. Add a small normalization method on
+`Cli` and call it immediately after Clap parses the process arguments. This keeps
+non-UTF-8 path support and every downstream consumer consistent:
+mutual-exclusion validation, checkpoint loading, start-superbatch selection,
+experiment naming, and lineage all continue to use `None` for a fresh run
+without adding local empty-path checks.
 
 Update the `--resume` help text to state that an empty value means no resume.
 
@@ -36,6 +39,7 @@ Add GPU-independent CLI regression tests that verify:
 1. `--resume ""` becomes `None` after normalization.
 2. A non-empty checkpoint path remains unchanged.
 3. Empty `--resume` works when the global option is placed after the subcommand.
+4. A whitespace-only checkpoint path remains unchanged.
 
 Run the focused `nnue-trainer` CLI tests, then the repository's required local
 CI before reporting completion.

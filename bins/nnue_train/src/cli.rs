@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{
+    Args, Parser, Subcommand,
+    builder::{OsStringValueParser, TypedValueParser},
+};
 #[cfg(any(feature = "gpu", test))]
 use nnue_format::ArchKind;
 
@@ -247,8 +250,13 @@ pub(crate) struct Cli {
     /// from the superbatch recorded in the checkpoint + 1. A v5+ checkpoint also
     /// stores the LR-schedule horizon; on resume the saved horizon is restored
     /// so the LR curve is reproduced independently of --superbatches (see
-    /// --lr-final-superbatch for the full precedence).
-    #[arg(long, global = true)]
+    /// --lr-final-superbatch for the full precedence). An empty value is treated
+    /// as if `--resume` was omitted.
+    #[arg(
+        long,
+        global = true,
+        value_parser = OsStringValueParser::new().map(PathBuf::from)
+    )]
     pub(crate) resume: Option<PathBuf>,
 
     /// Superbatch number to start training from (1-indexed, inclusive). When
@@ -558,6 +566,17 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
+    /// Treat an empty resume path as an omitted compatibility option.
+    pub(crate) fn normalize_empty_resume(&mut self) {
+        if self
+            .resume
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            self.resume = None;
+        }
+    }
+
     /// FT factorizer の実効 ON/OFF (default ON、`--no-ft-factorize` で OFF)。
     /// `--ft-factorize` は back-compat の明示 ON で、`overrides_with` により
     /// command-line 上で後勝ちする。`--init-from` との排他は呼び出し側
