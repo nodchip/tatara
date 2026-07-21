@@ -335,6 +335,16 @@ fn tanuki_output_requires_progress8kpabs_eight_buckets_and_coefficients() {
             "progress.bin",
         ],
         vec!["--bucket-mode", "progress8kpabs", "--num-buckets", "8"],
+        vec![
+            "--bucket-mode",
+            "progress8kpabs",
+            "--num-buckets",
+            "8",
+            "--progress-coeff",
+            "progress.bin",
+            "--scale",
+            "0",
+        ],
     ] {
         let error = validate_tanuki_argv(&args, FeatureSet::HalfKaHmMerged).unwrap_err();
         assert!(!error.to_string().is_empty());

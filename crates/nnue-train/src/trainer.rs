@@ -371,7 +371,7 @@ pub trait TrainerBackend {
 // =============================================================================
 
 /// 推論用 checkpoint の出力形式。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum OutputFormat {
     /// tatara LayerStack / Simple quantised binary。
     #[default]
@@ -379,7 +379,7 @@ pub enum OutputFormat {
     /// YaneuraOu SFNNWithoutPsqt evaluation file。
     Yaneuraou,
     /// Tanuki/Hakubishin の進行度 8 分割 SFNNWithoutPsqt evaluation file。
-    TanukiSfnnwoP1536,
+    TanukiSfnnwoP1536 { eval_scale: f32 },
 }
 
 /// 1 回の [`run`] に渡す training hyper-parameter 一式。

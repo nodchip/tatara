@@ -232,6 +232,9 @@ pub(crate) fn validate_tanuki_output_config(
             "--output-format tanuki-sfnnwop1536 requires --progress-coeff <progress.bin>".into(),
         );
     }
+    if !cli.scale.is_finite() || cli.scale <= 0.0 {
+        return Err("--output-format tanuki-sfnnwop1536 requires a finite positive --scale".into());
+    }
     Ok(())
 }
 
@@ -803,7 +806,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         batch_size: cli.batch_size,
         save_rate: cli.save_rate,
         fv_scale,
-        output_format: cli.output_format.into(),
+        output_format: cli.output_format.training_format(cli.scale),
         keep_raw_checkpoints: cli.keep_checkpoints,
         loss,
         score_drop_abs: cli.score_drop_abs,
@@ -2028,7 +2031,7 @@ pub(crate) fn run_simple_training(
         batch_size: cli.batch_size,
         save_rate: cli.save_rate,
         fv_scale: Some(trainer.fv_scale()),
-        output_format: cli.output_format.into(),
+        output_format: cli.output_format.training_format(cli.scale),
         keep_raw_checkpoints: cli.keep_checkpoints,
         loss,
         score_drop_abs: cli.score_drop_abs,

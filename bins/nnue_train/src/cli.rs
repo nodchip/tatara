@@ -195,10 +195,11 @@ pub(crate) struct Cli {
     pub(crate) end_wdl: Option<f32>,
 
     /// Score scale for the sigmoid loss (`loss_scale = 1 / scale`). On the
-    /// layerstack subcommand this is unused when `--win-rate-model` is set (WRM
-    /// loss uses the `--wrm-*` scaling instead). The simple trainer always uses
-    /// it to derive the exported `fv_scale`, so it stays in effect even under
-    /// the WRM there.
+    /// layerstack subcommand this is unused by the loss when `--win-rate-model`
+    /// is set (WRM loss uses the `--wrm-*` scaling instead), but
+    /// `--output-format tanuki-sfnnwop1536` still uses it for nnue-pytorch
+    /// compatible output-layer quantisation. The simple trainer always uses it
+    /// to derive the exported `fv_scale`, so it stays in effect even under WRM.
     #[arg(long, default_value_t = 290.0, global = true)]
     pub(crate) scale: f32,
 
@@ -619,14 +620,14 @@ impl OutputFormatArg {
             Self::TanukiSfnnwoP1536 => "tanuki-sfnnwop1536",
         }
     }
-}
 
-impl From<OutputFormatArg> for nnue_train::trainer::OutputFormat {
-    fn from(value: OutputFormatArg) -> Self {
-        match value {
-            OutputFormatArg::Tatara => Self::Tatara,
-            OutputFormatArg::Yaneuraou => Self::Yaneuraou,
-            OutputFormatArg::TanukiSfnnwoP1536 => Self::TanukiSfnnwoP1536,
+    pub(crate) fn training_format(self, eval_scale: f32) -> nnue_train::trainer::OutputFormat {
+        match self {
+            Self::Tatara => nnue_train::trainer::OutputFormat::Tatara,
+            Self::Yaneuraou => nnue_train::trainer::OutputFormat::Yaneuraou,
+            Self::TanukiSfnnwoP1536 => {
+                nnue_train::trainer::OutputFormat::TanukiSfnnwoP1536 { eval_scale }
+            }
         }
     }
 }

@@ -67,32 +67,40 @@ pub fn save_yaneuraou<W: Write>(writer: &mut W, weights: &LayerStackWeights) -> 
 /// LayerStack weights を Tanuki SFNNwoP1536 互換形式で書き出す。
 ///
 /// 現行 Tanuki/Hakubishin 構成に合わせて HalfKA_hm merged feature と 8 個の
-/// LayerStack を要求する。各層の次元はファイル形式では固定しない。
+/// LayerStack を要求する。各層の次元はファイル形式では固定しない。`eval_scale` は
+/// 学習時の score scale で、nnue-pytorch 互換の最終層量子化に使用する。
 pub fn save_tanuki_sfnnwop1536<W: Write>(
     writer: &mut W,
     weights: &LayerStackWeights,
+    eval_scale: f32,
 ) -> io::Result<()> {
-    save_sfnn(writer, weights, SfnnProfile::TanukiSfnnwoP1536)
+    save_sfnn(
+        writer,
+        weights,
+        SfnnProfile::TanukiSfnnwoP1536 {
+            eval_scale: f64::from(eval_scale),
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
 enum SfnnProfile {
     Yaneuraou,
-    TanukiSfnnwoP1536,
+    TanukiSfnnwoP1536 { eval_scale: f64 },
 }
 
 impl SfnnProfile {
     fn layer_stacks(self) -> usize {
         match self {
             Self::Yaneuraou => YANEURAOU_LAYER_STACKS,
-            Self::TanukiSfnnwoP1536 => TANUKI_SFNNWOP1536_LAYER_STACKS,
+            Self::TanukiSfnnwoP1536 { .. } => TANUKI_SFNNWOP1536_LAYER_STACKS,
         }
     }
 
     fn architecture_string(self, arch: &Architecture) -> String {
         match self {
             Self::Yaneuraou => yaneuraou_arch_string(arch),
-            Self::TanukiSfnnwoP1536 => {
+            Self::TanukiSfnnwoP1536 { .. } => {
                 "Network trained with https://github.com/official-stockfish/nnue-pytorch"
                     .to_string()
             }
@@ -102,7 +110,17 @@ impl SfnnProfile {
     fn name(self) -> &'static str {
         match self {
             Self::Yaneuraou => "YaneuraOu SFNN",
-            Self::TanukiSfnnwoP1536 => "Tanuki SFNNwoP1536",
+            Self::TanukiSfnnwoP1536 { .. } => "Tanuki SFNNwoP1536",
+        }
+    }
+
+    fn output_quantisation_scales(self) -> (f64, f64) {
+        match self {
+            Self::Yaneuraou => (f64::from(QA * QB), f64::from(QB)),
+            Self::TanukiSfnnwoP1536 { eval_scale } => {
+                let bias_scale = eval_scale * 16.0;
+                (bias_scale, bias_scale / f64::from(QA))
+            }
         }
     }
 }
@@ -155,12 +173,15 @@ fn save_sfnn<W: Write>(
         });
         write_affine(writer, l2_biases, l2_weights, l2_in, l2_out)?;
 
-        write_affine(
+        let (output_bias_scale, output_weight_scale) = profile.output_quantisation_scales();
+        write_affine_scaled(
             writer,
             std::iter::once(weights.l3_b[bucket]),
             (0..l2_out).map(|input| weights.l3_w[bucket * l2_out + input]),
             l2_out,
             1,
+            output_bias_scale,
+            output_weight_scale,
         )?;
     }
     Ok(())
@@ -234,7 +255,12 @@ fn validate_weights(
     weights: &LayerStackWeights,
     profile: SfnnProfile,
 ) -> io::Result<()> {
-    if matches!(profile, SfnnProfile::TanukiSfnnwoP1536)
+    if let SfnnProfile::TanukiSfnnwoP1536 { eval_scale } = profile
+        && (!eval_scale.is_finite() || eval_scale <= 0.0)
+    {
+        return invalid_input("Tanuki SFNNwoP1536 requires a finite positive eval scale");
+    }
+    if matches!(profile, SfnnProfile::TanukiSfnnwoP1536 { .. })
         && arch.feature_set != FeatureSet::HalfKaHmMerged
     {
         return invalid_input("Tanuki SFNNwoP1536 requires HalfKaHmMerged features");
@@ -305,8 +331,33 @@ where
     B: IntoIterator<Item = f32>,
     V: IntoIterator<Item = f32>,
 {
+    write_affine_scaled(
+        writer,
+        biases,
+        weights,
+        input_dimensions,
+        output_dimensions,
+        f64::from(QA * QB),
+        f64::from(QB),
+    )
+}
+
+fn write_affine_scaled<W, B, V>(
+    writer: &mut W,
+    biases: B,
+    weights: V,
+    input_dimensions: usize,
+    output_dimensions: usize,
+    bias_scale: f64,
+    weight_scale: f64,
+) -> io::Result<()>
+where
+    W: Write,
+    B: IntoIterator<Item = f32>,
+    V: IntoIterator<Item = f32>,
+{
     for bias in biases {
-        writer.write_all(&quantize_i32(bias, (QA * QB) as f64).to_le_bytes())?;
+        writer.write_all(&quantize_i32(bias, bias_scale).to_le_bytes())?;
     }
     let padded_input = input_dimensions.div_ceil(32) * 32;
     let mut weights = weights.into_iter();
@@ -319,7 +370,7 @@ where
             } else {
                 0.0
             };
-            writer.write_all(&[quantize_i8(value, QB as f64) as u8])?;
+            writer.write_all(&[quantize_i8(value, weight_scale) as u8])?;
         }
     }
     if weights.next().is_some() {
@@ -385,7 +436,7 @@ mod tests {
             TANUKI_SFNNWOP1536_LAYER_STACKS,
         );
         let mut bytes = Vec::new();
-        save_tanuki_sfnnwop1536(&mut bytes, &weights).unwrap();
+        save_tanuki_sfnnwop1536(&mut bytes, &weights, 600.0).unwrap();
 
         let mut cursor = Cursor::new(bytes.as_slice());
         assert_eq!(read_u32_test(&mut cursor), YO_VERSION);
@@ -430,8 +481,49 @@ mod tests {
                 l2_out,
                 TANUKI_SFNNWOP1536_LAYER_STACKS,
             );
-            save_tanuki_sfnnwop1536(&mut Vec::new(), &weights).unwrap();
+            save_tanuki_sfnnwop1536(&mut Vec::new(), &weights, 600.0).unwrap();
         }
+    }
+
+    #[test]
+    fn tanuki_profile_quantizes_output_layer_like_nnue_pytorch() {
+        use std::io::{Cursor, Read};
+
+        let mut weights = LayerStackWeights::zeroed(
+            FeatureSet::HalfKaHmMerged.spec(),
+            128,
+            2,
+            2,
+            TANUKI_SFNNWOP1536_LAYER_STACKS,
+        );
+        weights.l3_b[0] = 0.25;
+        weights.l3_w[0] = 0.25;
+
+        let mut bytes = Vec::new();
+        save_tanuki_sfnnwop1536(&mut bytes, &weights, 600.0).unwrap();
+        let mut cursor = Cursor::new(bytes.as_slice());
+        cursor.set_position(8);
+        let arch_len = read_u32_test(&mut cursor) as u64;
+        cursor.set_position(cursor.position() + arch_len);
+        assert_eq!(read_u32_test(&mut cursor), YO_FT_HASH);
+        crate::layerstack_weights::read_leb128_tensor_i16(&mut cursor, Some(128)).unwrap();
+        crate::layerstack_weights::read_leb128_tensor_i16(
+            &mut cursor,
+            Some(FeatureSet::HalfKaHmMerged.spec().ft_in() * 128),
+        )
+        .unwrap();
+
+        assert_eq!(read_u32_test(&mut cursor), YO_NETWORK_HASH);
+        let l1_bytes = 2 * 4 + 2 * 128;
+        let l2_bytes = 2 * 4 + 2 * 32;
+        cursor.set_position(cursor.position() + (l1_bytes + l2_bytes) as u64);
+
+        let mut bias = [0; 4];
+        cursor.read_exact(&mut bias).unwrap();
+        assert_eq!(i32::from_le_bytes(bias), 2_400);
+        let mut first_weight = [0];
+        cursor.read_exact(&mut first_weight).unwrap();
+        assert_eq!(first_weight[0] as i8, 19);
     }
 
     #[test]
@@ -444,7 +536,7 @@ mod tests {
             TANUKI_SFNNWOP1536_LAYER_STACKS,
         );
         assert!(
-            save_tanuki_sfnnwop1536(&mut Vec::new(), &wrong_feature)
+            save_tanuki_sfnnwop1536(&mut Vec::new(), &wrong_feature, 600.0)
                 .unwrap_err()
                 .to_string()
                 .contains("HalfKaHmMerged")
@@ -458,10 +550,24 @@ mod tests {
             YANEURAOU_LAYER_STACKS,
         );
         assert!(
-            save_tanuki_sfnnwop1536(&mut Vec::new(), &wrong_buckets)
+            save_tanuki_sfnnwop1536(&mut Vec::new(), &wrong_buckets, 600.0)
                 .unwrap_err()
                 .to_string()
                 .contains("8 LayerStacks")
+        );
+
+        let weights = LayerStackWeights::zeroed(
+            FeatureSet::HalfKaHmMerged.spec(),
+            128,
+            4,
+            3,
+            TANUKI_SFNNWOP1536_LAYER_STACKS,
+        );
+        assert!(
+            save_tanuki_sfnnwop1536(&mut Vec::new(), &weights, 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("positive")
         );
     }
 
