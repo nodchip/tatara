@@ -235,6 +235,13 @@ pub(crate) fn validate_tanuki_output_config(
     if !cli.scale.is_finite() || cli.scale <= 0.0 {
         return Err("--output-format tanuki-sfnnwop1536 requires a finite positive --scale".into());
     }
+    if cli.win_rate_model && cli.scale != cli.wrm_nnue2score {
+        return Err(format!(
+            "--output-format tanuki-sfnnwop1536 requires --scale ({}) to equal --wrm-nnue2score ({}) when --win-rate-model is used",
+            cli.scale, cli.wrm_nnue2score
+        )
+        .into());
+    }
     Ok(())
 }
 
