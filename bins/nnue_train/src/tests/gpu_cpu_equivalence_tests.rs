@@ -5868,7 +5868,7 @@ fn layerstack_raw_ckpt_roundtrip(with_psqt: bool) -> Result<(), Box<dyn std::err
     // step while inheriting slow, then inherit m/v + global step while
     // resetting slow to the loaded fast weights.
     let (saved_step, saved_groups) = saver.raw_checkpoint_state_to_host()?;
-    assert_eq!(saved_step, RANGER_K as u64);
+    assert_eq!(saved_step, RANGER_K);
 
     let mut reset_optimizer = new_trainer()?;
     reset_optimizer.load_raw_checkpoint(&path, false, true, false)?;

@@ -148,16 +148,22 @@ mod gpu {
 
     // Ranger optimizer params。値は `nnue_train::optimizer::RangerParams::DEFAULT`
     // を single source of truth として参照する。
+    #[cfg(test)]
     pub(crate) const RANGER_DEFAULTS: nnue_train::optimizer::RangerParams =
         nnue_train::optimizer::RangerParams::DEFAULT;
     /// ranger の beta1。本番経路は `OptimizerKind::beta1()` が種別ごとに解決する
     /// ため、この const は ranger 既定値で kernel を叩く同等性テスト専用。
     #[cfg(test)]
     pub(crate) const BETA1: f32 = RANGER_DEFAULTS.beta1;
+    #[cfg(test)]
     pub(crate) const BETA2: f32 = RANGER_DEFAULTS.beta2;
+    #[cfg(test)]
     pub(crate) const EPS: f32 = RANGER_DEFAULTS.eps;
+    #[cfg(test)]
     pub(crate) const RANGER_ALPHA: f32 = RANGER_DEFAULTS.alpha;
+    #[cfg(test)]
     pub(crate) const RANGER_K: u64 = RANGER_DEFAULTS.k as u64;
+    #[cfg(test)]
     pub(crate) const N_SMA_THRESHOLD: f32 = RANGER_DEFAULTS.n_sma_threshold;
 
     // Per-layer training-time weight clamp。clamp 範囲は対象テンソルの量子化 dtype で
@@ -177,6 +183,7 @@ mod gpu {
     /// i8 dense weight (L1 / L1f / L2 / L3 weight) と、挙動 neutral 維持のため同じ範囲に
     /// 据える L1 / L1f / L2 bias に渡す対称 clamp ±i8::MAX/QB (= ±127/64)。i8 量子化
     /// `round(w·QB)` の正側端点 (127) に対応する。
+    #[cfg(test)]
     pub(crate) const W_CLAMP_QUANT_MIN: f32 =
         -(i8::MAX as f32) / nnue_format::layerstack_weights::QB as f32;
     pub(crate) const W_CLAMP_QUANT_MAX: f32 =
