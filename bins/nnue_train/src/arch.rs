@@ -104,6 +104,48 @@ mod gpu {
     /// 上側のみ。scale は power-of-2。
     pub(crate) const FT_OPT_V_SCALE: f32 = (1_u64 << 40) as f32;
 
+    /// Runtime-selectable numerical scales. Defaults preserve the historical
+    /// quantisation path exactly; non-default values are intended for measured
+    /// training experiments and are recorded by the invoking Goal plan.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(crate) struct NumericRuntime {
+        pub ft_post_scale: f32,
+        pub l1_sqr_scale: f32,
+        pub ft_dft_fp16_base_scale: f32,
+        pub ft_opt_m_scale: f32,
+        pub ft_opt_v_scale: f32,
+        pub quant_weight_clamp_abs: f32,
+    }
+
+    impl NumericRuntime {
+        pub(crate) const DEFAULT: Self = Self {
+            ft_post_scale: FT_POST_SCALE,
+            l1_sqr_scale: L1_SQR_SCALE,
+            ft_dft_fp16_base_scale: FT_DFT_FP16_BASE_SCALE,
+            ft_opt_m_scale: FT_OPT_M_SCALE,
+            ft_opt_v_scale: FT_OPT_V_SCALE,
+            quant_weight_clamp_abs: W_CLAMP_QUANT_MAX,
+        };
+
+        pub(crate) fn validate(self) -> Result<Self, &'static str> {
+            let values = [
+                self.ft_post_scale,
+                self.l1_sqr_scale,
+                self.ft_dft_fp16_base_scale,
+                self.ft_opt_m_scale,
+                self.ft_opt_v_scale,
+                self.quant_weight_clamp_abs,
+            ];
+            if values
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+            {
+                return Err("numeric runtime scales must be finite and > 0");
+            }
+            Ok(self)
+        }
+    }
+
     // Ranger optimizer params。値は `nnue_train::optimizer::RangerParams::DEFAULT`
     // を single source of truth として参照する。
     pub(crate) const RANGER_DEFAULTS: nnue_train::optimizer::RangerParams =

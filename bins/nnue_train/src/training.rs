@@ -14,7 +14,7 @@ use nnue_train::experiment::{DataInfo, ExperimentDoc, ExperimentLogger, Lineage,
 #[cfg(feature = "gpu")]
 use nnue_train::init::{LayerStackInit, SimpleInit, WeightLayer};
 #[cfg(any(feature = "gpu", test))]
-use nnue_train::optimizer::OptimizerKind;
+use nnue_train::optimizer::{OptimizerKind, OptimizerRuntime};
 #[cfg(feature = "gpu")]
 use nnue_train::schedule::WdlScheduler;
 #[cfg(any(feature = "gpu", test))]
@@ -34,6 +34,20 @@ use shogi_features::{FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS};
 use crate::cli::*;
 #[cfg(feature = "gpu")]
 use crate::{trainer_common::PrecisionFlags, trainer_layerstack::*, trainer_simple::*};
+
+#[cfg(feature = "gpu")]
+fn numeric_runtime(cli: &Cli) -> Result<crate::arch::NumericRuntime, Box<dyn std::error::Error>> {
+    crate::arch::NumericRuntime {
+        ft_post_scale: cli.ft_post_scale,
+        l1_sqr_scale: cli.l1_sqr_scale,
+        ft_dft_fp16_base_scale: cli.ft_dft_fp16_base_scale,
+        ft_opt_m_scale: cli.ft_opt_m_scale,
+        ft_opt_v_scale: cli.ft_opt_v_scale,
+        quant_weight_clamp_abs: cli.quant_weight_clamp_abs,
+    }
+    .validate()
+    .map_err(Into::into)
+}
 
 #[cfg(any(feature = "gpu", test))]
 // kernel の per-bucket backward 容量 (arch.rs) が正典。値の乖離を防ぐため再輸出する。
@@ -126,6 +140,7 @@ struct SharedCliValidation {
     feature_set: FeatureSetSpec,
     precision: SharedPrecisionFlags,
     optimizer: OptimizerKind,
+    optimizer_runtime: OptimizerRuntime,
 }
 
 #[cfg(feature = "gpu")]
@@ -306,6 +321,16 @@ fn validate_shared_cli(
             cli.optimizer
         )
     })?;
+    let optimizer_runtime = OptimizerRuntime {
+        beta1: cli.optimizer_beta1.unwrap_or_else(|| optimizer.beta1()),
+        beta2: cli.optimizer_beta2,
+        eps: cli.optimizer_epsilon,
+        lookahead_alpha: cli.ranger_lookahead_alpha,
+        lookahead_k: cli.ranger_lookahead_k,
+        n_sma_threshold: cli.radam_n_sma_threshold,
+    }
+    .validate()
+    .map_err(|message| format!("invalid optimizer runtime: {message}"))?;
     // `--ft-fp16-out` は weight FP16 path の上に積む拡張なので `--ft-fp16` を要求する。
     if ft_fp16_out_missing_ft_fp16(ft_fp16_out_raw, cli.ft_fp16, cli.all_optim) {
         return Err(
@@ -339,6 +364,12 @@ fn validate_shared_cli(
     if cli.threads == 0 {
         return Err("--threads must be >= 1".into());
     }
+    if matches!(cli.dataloader_prefetch_depth, Some(0)) {
+        return Err("--dataloader-prefetch-depth must be >= 1".into());
+    }
+    if cli.max_barren_passes == 0 {
+        return Err("--max-barren-passes must be >= 1".into());
+    }
     if cli.init_from.is_some() && cli.resume.is_some() {
         return Err("--init-from and --resume are mutually exclusive (--init-from injects weights but resets the optimizer state; --resume preserves it)".into());
     }
@@ -371,6 +402,7 @@ fn validate_shared_cli(
     Ok(SharedCliValidation {
         feature_set,
         optimizer,
+        optimizer_runtime,
         precision: SharedPrecisionFlags {
             ft_fp16: cli.ft_fp16 || cli.all_optim,
             ft_fp16_out: ft_fp16_out_raw || cli.all_optim,
@@ -413,6 +445,8 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let shared = validate_shared_cli(cli, layerstack.ft_fp16_out, layerstack.tf32)?;
+    let numeric_runtime = numeric_runtime(cli)?;
+    nnue_train::dataloader::configure_runtime(cli.dataloader_prefetch_depth, cli.max_barren_passes);
     let feature_set = shared.feature_set;
 
     // Threat profile の解決。`off` は base と bit-identical (None)。
@@ -749,6 +783,17 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             e
         }
     })?;
+    trainer.set_optimizer_runtime(shared.optimizer_runtime);
+    trainer.set_numeric_runtime(numeric_runtime);
+    println!(
+        "[train] optimizer runtime: beta1={} beta2={} epsilon={} lookahead_alpha={} lookahead_k={} n_sma_threshold={}",
+        shared.optimizer_runtime.beta1,
+        shared.optimizer_runtime.beta2,
+        shared.optimizer_runtime.eps,
+        shared.optimizer_runtime.lookahead_alpha,
+        shared.optimizer_runtime.lookahead_k,
+        shared.optimizer_runtime.n_sma_threshold,
+    );
     // resume / init-from の処理 → 開始 superbatch と (resume なら) 親 run id /
     // 保存済 LR horizon を決める。
     let (resumed_superbatch, resume_parent_id, resumed_lr_horizon): (
@@ -1892,6 +1937,8 @@ pub(crate) fn run_simple_training(
         .expect("run_simple_training called with --data");
 
     let shared = validate_shared_cli(cli, simple_args.ft_fp16_out, simple_args.tf32)?;
+    let numeric_runtime = numeric_runtime(cli)?;
+    nnue_train::dataloader::configure_runtime(cli.dataloader_prefetch_depth, cli.max_barren_passes);
     let feature_set = shared.feature_set;
     if cli.norm_loss && (!cli.norm_loss_factor.is_finite() || cli.norm_loss_factor < 0.0) {
         return Err(format!(
@@ -2043,6 +2090,8 @@ pub(crate) fn run_simple_training(
             e
         }
     })?;
+    trainer.set_optimizer_runtime(shared.optimizer_runtime);
+    trainer.set_numeric_runtime(numeric_runtime);
 
     let (resumed_superbatch, resume_parent_id, resumed_lr_horizon): (
         Option<usize>,

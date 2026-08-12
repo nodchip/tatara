@@ -8,7 +8,6 @@ use nnue_format::ArchKind;
 use shogi_features::{FeatureSet, FeatureSetSpec};
 
 #[cfg(feature = "gpu")]
-use crate::arch::{FT_OPT_M_SCALE, FT_OPT_V_SCALE};
 #[cfg(feature = "gpu")]
 use crate::trainer_common::MomentBuf;
 
@@ -149,6 +148,8 @@ pub(crate) enum RawCkptGroupBufs<'a> {
         m: &'a MomentBuf,
         v: &'a MomentBuf,
         slow: &'a DeviceBuffer<f32>,
+        m_scale: f32,
+        v_scale: f32,
     },
 }
 
@@ -168,10 +169,17 @@ impl RawCkptGroupSource<'_> {
                 v.to_host_vec(stream)?,
                 slow.to_host_vec(stream)?,
             ),
-            RawCkptGroupBufs::FtMoment { w, m, v, slow } => (
+            RawCkptGroupBufs::FtMoment {
+                w,
+                m,
+                v,
+                slow,
+                m_scale,
+                v_scale,
+            } => (
                 w.to_host_vec(stream)?,
-                m.to_host_f32(stream, FT_OPT_M_SCALE)?,
-                v.to_host_f32(stream, FT_OPT_V_SCALE)?,
+                m.to_host_f32(stream, m_scale)?,
+                v.to_host_f32(stream, v_scale)?,
                 slow.to_host_vec(stream)?,
             ),
         })

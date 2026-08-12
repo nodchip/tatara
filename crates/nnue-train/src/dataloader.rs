@@ -504,6 +504,20 @@ impl PrefetchedLoader {
 /// これに達したら無限ループせず error を返す。
 pub const MAX_BARREN_PASSES: u32 = 5;
 
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+static PREFETCH_DEPTH_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+static RUNTIME_MAX_BARREN_PASSES: AtomicU32 = AtomicU32::new(MAX_BARREN_PASSES);
+
+/// Configure process-wide dataloader limits before spawning workers. A trainer
+/// invocation owns one dataloader, so a process-wide immutable-after-start
+/// setting avoids widening the loader API while keeping tests/default callers
+/// unchanged.
+pub fn configure_runtime(prefetch_depth: Option<usize>, max_barren_passes: u32) {
+    PREFETCH_DEPTH_OVERRIDE.store(prefetch_depth.unwrap_or(0), Ordering::Relaxed);
+    RUNTIME_MAX_BARREN_PASSES.store(max_barren_passes, Ordering::Relaxed);
+}
+
 /// `PsvFileLoader` を逐次読み、EOF で同 file を開き直して次 epoch とする stream
 /// reader。`--score-drop-abs` の近似 skip (`|score| >= t` を捨てる) と空 file の
 /// 無限ループ防止 (`MAX_BARREN_PASSES`) を内包する。bucket 計算は **行わない**
@@ -579,7 +593,7 @@ impl PsvEpochReader {
                 None => {
                     if self.pushed_this_epoch == 0 {
                         self.barren_passes += 1;
-                        if self.barren_passes >= MAX_BARREN_PASSES {
+                        if self.barren_passes >= RUNTIME_MAX_BARREN_PASSES.load(Ordering::Relaxed) {
                             return Err(io::Error::other(format!(
                                 "data file {} range [{}, {}) yielded no usable positions over {} \
                                  full passes (empty range, or all positions filtered out by \
@@ -610,7 +624,12 @@ impl PsvEpochReader {
 /// 完成 batch のチャネル容量 (worker が main をどれだけ先読みするか) を
 /// `--threads` から決める係数 + 下限。
 fn prefetch_depth_for(num_workers: usize) -> usize {
-    (2 * num_workers).max(2)
+    let configured = PREFETCH_DEPTH_OVERRIDE.load(Ordering::Relaxed);
+    if configured == 0 {
+        (2 * num_workers).max(2)
+    } else {
+        configured
+    }
 }
 
 /// 1 個の prefetch worker が消費 / 生成する単位。`(buffers, buckets)` を ring で

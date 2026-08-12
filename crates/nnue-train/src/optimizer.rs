@@ -78,12 +78,77 @@ impl OptimizerKind {
     /// bias correction を行わないため step によらず `(1.0, 1)` で、kernel の
     /// 更新式は `p -= lr * m / (sqrt(v) + eps)` に退化する。
     pub fn step_size_denom(self, step: u64, beta2: f32, n_sma_threshold: f32) -> (f32, i32) {
+        self.step_size_denom_with_beta1(step, self.beta1(), beta2, n_sma_threshold)
+    }
+
+    /// Variant of [`Self::step_size_denom`] with an explicit first-moment
+    /// coefficient.  The CLI uses this path when `--optimizer-beta1` is set;
+    /// callers that want the historical per-kind default keep using
+    /// [`Self::step_size_denom`].
+    pub fn step_size_denom_with_beta1(
+        self,
+        step: u64,
+        beta1: f32,
+        beta2: f32,
+        n_sma_threshold: f32,
+    ) -> (f32, i32) {
         match self {
             Self::Ranger | Self::RAdam => {
-                radam_compute_step_size_denom(step, self.beta1(), beta2, n_sma_threshold)
+                radam_compute_step_size_denom(step, beta1, beta2, n_sma_threshold)
             }
             Self::AdamW => (1.0, 1),
         }
+    }
+}
+
+/// Fully resolved Adam-family runtime coefficients.  Keeping these values in
+/// one object makes command-line overrides flow identically through the Simple
+/// and LayerStack trainers while preserving the historical defaults.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OptimizerRuntime {
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+    pub lookahead_alpha: f32,
+    pub lookahead_k: u64,
+    pub n_sma_threshold: f32,
+}
+
+impl OptimizerRuntime {
+    pub fn for_kind(kind: OptimizerKind) -> Self {
+        Self {
+            beta1: kind.beta1(),
+            beta2: RangerParams::DEFAULT.beta2,
+            eps: RangerParams::DEFAULT.eps,
+            lookahead_alpha: RangerParams::DEFAULT.alpha,
+            lookahead_k: RangerParams::DEFAULT.k as u64,
+            n_sma_threshold: RangerParams::DEFAULT.n_sma_threshold,
+        }
+    }
+
+    pub fn validate(self) -> Result<Self, &'static str> {
+        if !(self.beta1.is_finite() && self.beta1 > 0.0 && self.beta1 < 1.0) {
+            return Err("optimizer beta1 must be finite and in (0, 1)");
+        }
+        if !(self.beta2.is_finite() && self.beta2 > 0.0 && self.beta2 < 1.0) {
+            return Err("optimizer beta2 must be finite and in (0, 1)");
+        }
+        if !(self.eps.is_finite() && self.eps > 0.0) {
+            return Err("optimizer epsilon must be finite and > 0");
+        }
+        if !(self.lookahead_alpha.is_finite()
+            && self.lookahead_alpha >= 0.0
+            && self.lookahead_alpha <= 1.0)
+        {
+            return Err("Ranger lookahead alpha must be finite and in [0, 1]");
+        }
+        if self.lookahead_k == 0 {
+            return Err("Ranger lookahead k must be >= 1");
+        }
+        if !(self.n_sma_threshold.is_finite() && self.n_sma_threshold >= 0.0) {
+            return Err("RAdam n_sma threshold must be finite and >= 0");
+        }
+        Ok(self)
     }
 }
 
@@ -153,6 +218,23 @@ mod tests {
         assert_eq!(p.k, 6);
         assert_eq!(p.eps, 1e-8);
         assert_eq!(p.n_sma_threshold, 5.0);
+    }
+
+    #[test]
+    fn optimizer_runtime_resolves_kind_defaults_and_validates_overrides() {
+        assert_eq!(
+            OptimizerRuntime::for_kind(OptimizerKind::Ranger).beta1,
+            0.99
+        );
+        assert_eq!(OptimizerRuntime::for_kind(OptimizerKind::RAdam).beta1, 0.9);
+        let mut runtime = OptimizerRuntime::for_kind(OptimizerKind::Ranger);
+        runtime.beta1 = 0.97;
+        runtime.beta2 = 0.998;
+        runtime.lookahead_alpha = 0.4;
+        runtime.lookahead_k = 8;
+        assert_eq!(runtime.validate(), Ok(runtime));
+        runtime.lookahead_k = 0;
+        assert!(runtime.validate().is_err());
     }
 
     #[test]

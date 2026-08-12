@@ -368,6 +368,25 @@ pub(crate) struct Cli {
     /// stores moment buffers but not the optimizer name).
     #[arg(long, default_value = "ranger", global = true)]
     pub(crate) optimizer: String,
+    /// First-moment EMA coefficient. When omitted, uses the selected
+    /// optimizer's historical default (Ranger 0.99; RAdam/AdamW 0.9).
+    #[arg(long, global = true)]
+    pub(crate) optimizer_beta1: Option<f32>,
+    /// Second-moment EMA coefficient shared by the Adam-family optimizers.
+    #[arg(long, default_value_t = 0.999, global = true)]
+    pub(crate) optimizer_beta2: f32,
+    /// Numerical stability epsilon used by the Adam-family denominator.
+    #[arg(long, default_value_t = 1e-8, global = true)]
+    pub(crate) optimizer_epsilon: f32,
+    /// Ranger Lookahead interpolation coefficient.
+    #[arg(long, default_value_t = 0.5, global = true)]
+    pub(crate) ranger_lookahead_alpha: f32,
+    /// Ranger Lookahead update period in optimizer steps.
+    #[arg(long, default_value_t = 6, global = true)]
+    pub(crate) ranger_lookahead_k: u64,
+    /// RAdam variance-rectification n_sma threshold.
+    #[arg(long, default_value_t = 5.0, global = true)]
+    pub(crate) radam_n_sma_threshold: f32,
     /// Weight decay coefficient for the optimizer (AdamW-style decoupled
     /// weight decay). The default 0.0 means no decay. A non-zero value slightly
     /// decays the weights of every weight group toward 0 on each step.
@@ -434,6 +453,32 @@ pub(crate) struct Cli {
     /// within an epoch is non-deterministic, which is fine for training).
     #[arg(long, default_value_t = 16, global = true)]
     pub(crate) threads: usize,
+    /// Completed-batch channel capacity for dataloader prefetch. When omitted,
+    /// uses max(2 * --threads, 2).
+    #[arg(long, global = true)]
+    pub(crate) dataloader_prefetch_depth: Option<usize>,
+    /// Consecutive full input passes with no usable positions before failing.
+    #[arg(long, default_value_t = 5, global = true)]
+    pub(crate) max_barren_passes: u32,
+    /// Scale applied after FT activation (historical default 127/128).
+    #[arg(long, default_value_t = 127.0 / 128.0, global = true)]
+    pub(crate) ft_post_scale: f32,
+    /// Scale applied to the LayerStack squared L1 branch.
+    #[arg(long, default_value_t = 127.0 / 128.0, global = true)]
+    pub(crate) l1_sqr_scale: f32,
+    /// Base FP16 FT-gradient loss scale; the runtime multiplier is this value
+    /// times the current batch size.
+    #[arg(long, default_value_t = 16384.0, global = true)]
+    pub(crate) ft_dft_fp16_base_scale: f32,
+    /// Storage scale for the FP16 FT optimizer first moment.
+    #[arg(long, default_value_t = 268435456.0, global = true)]
+    pub(crate) ft_opt_m_scale: f32,
+    /// Storage scale for the FP16 FT optimizer second moment.
+    #[arg(long, default_value_t = 1099511627776.0, global = true)]
+    pub(crate) ft_opt_v_scale: f32,
+    /// Symmetric training-time clamp for quantised dense weights and biases.
+    #[arg(long, default_value_t = 127.0 / 64.0, global = true)]
+    pub(crate) quant_weight_clamp_abs: f32,
 
     /// Fast mode that runs the FT weight (`ft_w`) forward pass through an FP16
     /// mirror. With the default `false`, it is bit-identical to the FP32 path.

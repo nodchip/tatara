@@ -6,7 +6,7 @@ use nnue_format::ArchKind;
 use nnue_format::LayerStackWeights;
 use nnue_train::dataloader::BucketMode;
 use nnue_train::init::{self, LayerStackInit, WeightShape};
-use nnue_train::optimizer::OptimizerKind;
+use nnue_train::optimizer::{OptimizerKind, OptimizerRuntime};
 use nnue_train::trainer::LossKind;
 use shogi_features::FeatureSetSpec;
 
@@ -262,6 +262,8 @@ pub(crate) struct GpuTrainer {
     num_buckets: usize,
     bucket_mode: BucketMode,
     optimizer: OptimizerKind,
+    optimizer_runtime: OptimizerRuntime,
+    numeric_runtime: NumericRuntime,
     step_count: u64,
 }
 
@@ -712,17 +714,20 @@ struct UniformOptimGroup<'a> {
 /// `Dense`、全 bias は `Bias`、PSQT shortcut weight は入力側 weight なので `Ft`。
 /// dense weight (L1/L1f/L2/L3 weight + L1/L1f/L2 bias) は i8@QB 量子化由来の対称 clamp、
 /// clamp 不要なテンソル (FT bias / L3 bias / PSQT) は sentinel を渡す。
-fn uniform_optim_group_layout(psqt_enabled: bool) -> Vec<(&'static str, OptimGroupKind, f32, f32)> {
+fn uniform_optim_group_layout(
+    psqt_enabled: bool,
+    quant_clamp_abs: f32,
+) -> Vec<(&'static str, OptimGroupKind, f32, f32)> {
     use OptimGroupKind::{Bias, Dense, Ft};
     let mut groups = vec![
         ("ft_b", Bias, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX),
-        ("l1_w", Dense, W_CLAMP_QUANT_MIN, W_CLAMP_QUANT_MAX),
-        ("l1_b", Bias, W_CLAMP_QUANT_MIN, W_CLAMP_QUANT_MAX),
-        ("l1f_w", Dense, W_CLAMP_QUANT_MIN, W_CLAMP_QUANT_MAX),
-        ("l1f_b", Bias, W_CLAMP_QUANT_MIN, W_CLAMP_QUANT_MAX),
-        ("l2_w", Dense, W_CLAMP_QUANT_MIN, W_CLAMP_QUANT_MAX),
-        ("l2_b", Bias, W_CLAMP_QUANT_MIN, W_CLAMP_QUANT_MAX),
-        ("l3_w", Dense, W_CLAMP_QUANT_MIN, W_CLAMP_QUANT_MAX),
+        ("l1_w", Dense, -quant_clamp_abs, quant_clamp_abs),
+        ("l1_b", Bias, -quant_clamp_abs, quant_clamp_abs),
+        ("l1f_w", Dense, -quant_clamp_abs, quant_clamp_abs),
+        ("l1f_b", Bias, -quant_clamp_abs, quant_clamp_abs),
+        ("l2_w", Dense, -quant_clamp_abs, quant_clamp_abs),
+        ("l2_b", Bias, -quant_clamp_abs, quant_clamp_abs),
+        ("l3_w", Dense, -quant_clamp_abs, quant_clamp_abs),
         ("l3_b", Bias, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX),
     ];
     if psqt_enabled {
@@ -1011,6 +1016,8 @@ impl GpuTrainer {
             num_buckets,
             bucket_mode,
             optimizer,
+            optimizer_runtime: OptimizerRuntime::for_kind(optimizer),
+            numeric_runtime: NumericRuntime::DEFAULT,
             step_count: 0,
         };
         // forward 用 FT weight (mirror / comb) を初期重みと同期し、構築直後から
@@ -1019,6 +1026,16 @@ impl GpuTrainer {
         // --resume) は load 後に caller が再同期する。
         trainer.sync_ft_forward_weights()?;
         Ok(trainer)
+    }
+
+    /// Apply validated command-line optimizer coefficients before any
+    /// checkpoint load or training step.
+    pub(crate) fn set_optimizer_runtime(&mut self, runtime: OptimizerRuntime) {
+        self.optimizer_runtime = runtime;
+    }
+
+    pub(crate) fn set_numeric_runtime(&mut self, runtime: NumericRuntime) {
+        self.numeric_runtime = runtime;
     }
 
     /// `LayerStackWeights` から weight buffer を device に upload (pretrained 注入、`--init-from`)。
@@ -1298,6 +1315,8 @@ impl GpuTrainer {
                     m: &self.ft_w_m,
                     v: &self.ft_w_v,
                     slow: &self.ft_w_slow,
+                    m_scale: self.numeric_runtime.ft_opt_m_scale,
+                    v_scale: self.numeric_runtime.ft_opt_v_scale,
                 },
             },
             uniform!("ft_b", ft_b_n, ft_b, ft_b_m, ft_b_v, ft_b_slow),
@@ -1448,12 +1467,22 @@ impl GpuTrainer {
         let (ftw_w, ftw_m, ftw_v, ftw_slow) = &loaded[0];
         self.ft_w = DeviceBuffer::from_host(&self.stream, ftw_w)?;
         self.ft_w_m = if inherit_optimizer_state {
-            MomentBuf::from_host_f32(&self.stream, ftw_m, self.fp16_opt_state, FT_OPT_M_SCALE)?
+            MomentBuf::from_host_f32(
+                &self.stream,
+                ftw_m,
+                self.fp16_opt_state,
+                self.numeric_runtime.ft_opt_m_scale,
+            )?
         } else {
             MomentBuf::zeroed(&self.stream, ftw_w.len(), self.fp16_opt_state)?
         };
         self.ft_w_v = if inherit_optimizer_state {
-            MomentBuf::from_host_f32(&self.stream, ftw_v, self.fp16_opt_state, FT_OPT_V_SCALE)?
+            MomentBuf::from_host_f32(
+                &self.stream,
+                ftw_v,
+                self.fp16_opt_state,
+                self.numeric_runtime.ft_opt_v_scale,
+            )?
         } else {
             MomentBuf::zeroed(&self.stream, ftw_w.len(), self.fp16_opt_state)?
         };
@@ -2058,7 +2087,7 @@ impl GpuTrainer {
                             .expect("ft_nstm_out_h is Some when ft_fp16_out is enabled")),
                         slice(self.ft_b),
                         slice_mut(self.ws.combined),
-                        b_u32, ft_out as u32, FT_POST_SCALE
+                        b_u32, ft_out as u32, self.numeric_runtime.ft_post_scale
                     ]
                 }
             }?;
@@ -2076,7 +2105,7 @@ impl GpuTrainer {
                         slice(self.ws.ft_nstm_out),
                         slice(self.ft_b),
                         slice_mut(self.ws.combined),
-                        b_u32, ft_out as u32, FT_POST_SCALE
+                        b_u32, ft_out as u32, self.numeric_runtime.ft_post_scale
                     ]
                 }
             }?;
@@ -2378,7 +2407,7 @@ impl GpuTrainer {
                 args: [
                     slice(self.ws.l1_main),
                     slice_mut(self.ws.l1_sqr),
-                    L1_SQR_SCALE,
+                    self.numeric_runtime.l1_sqr_scale,
                     (b * l1_effective) as u32
                 ]
             }
@@ -2990,7 +3019,7 @@ impl GpuTrainer {
                     slice(self.ws.l1_main),
                     slice(self.ws.dl1_sqr),
                     slice_mut(self.ws.dl1_main_from_sqr),
-                    L1_SQR_SCALE,
+                    self.numeric_runtime.l1_sqr_scale,
                     (b * l1_effective) as u32
                 ]
             }
@@ -3339,7 +3368,7 @@ impl GpuTrainer {
         // dft (FT activation gradient) FP16 化の loss scaling 係数。dft ∝ 1/batch なので
         // batch 比例にして batch 非依存に f16 域へ載せる ([`FT_DFT_FP16_BASE_SCALE`])。
         // grad kernel が `* dft_scale` で書き、gather kernel が `* dft_inv_scale` で戻す。
-        let dft_scale = FT_DFT_FP16_BASE_SCALE * (b as f32);
+        let dft_scale = self.numeric_runtime.ft_dft_fp16_base_scale * (b as f32);
         let dft_inv_scale = 1.0_f32 / dft_scale;
 
         // -- Backward 3 reverse: ft_post_perspective_grad fused × 2 (stm, nstm) --
@@ -3367,7 +3396,7 @@ impl GpuTrainer {
                             .expect("dft_stm_out_h is Some when ft_fp16_out is enabled")),
                         slice(self.ft_b_grad),
                         slice(self.fp16_clamp_counter),
-                        b_u32, ft_out as u32, 0_u32, ft_out as u32, FT_POST_SCALE,
+                        b_u32, ft_out as u32, 0_u32, ft_out as u32, self.numeric_runtime.ft_post_scale,
                         dft_scale
                     ]
                 }
@@ -3390,7 +3419,7 @@ impl GpuTrainer {
                             .expect("dft_nstm_out_h is Some when ft_fp16_out is enabled")),
                         slice(self.ft_b_grad),
                         slice(self.fp16_clamp_counter),
-                        b_u32, ft_out as u32, (ft_out / 2) as u32, ft_out as u32, FT_POST_SCALE,
+                        b_u32, ft_out as u32, (ft_out / 2) as u32, ft_out as u32, self.numeric_runtime.ft_post_scale,
                         dft_scale
                     ]
                 }
@@ -3416,7 +3445,7 @@ impl GpuTrainer {
                         slice(self.ft_b),
                         slice_mut(self.ws.dft_stm_out),
                         slice(self.ft_b_grad),
-                        b_u32, ft_out as u32, 0_u32, ft_out as u32, FT_POST_SCALE
+                        b_u32, ft_out as u32, 0_u32, ft_out as u32, self.numeric_runtime.ft_post_scale
                     ]
                 }
             }?;
@@ -3435,7 +3464,7 @@ impl GpuTrainer {
                         slice(self.ft_b),
                         slice_mut(self.ws.dft_nstm_out),
                         slice(self.ft_b_grad),
-                        b_u32, ft_out as u32, (ft_out / 2) as u32, ft_out as u32, FT_POST_SCALE
+                        b_u32, ft_out as u32, (ft_out / 2) as u32, ft_out as u32, self.numeric_runtime.ft_post_scale
                     ]
                 }
             }?;
@@ -3718,7 +3747,7 @@ impl GpuTrainer {
                         stream: self.stream, module: self.module,
                         config: cfg_1d(($ng) * ($len)),
                         args: [slice_mut($w), slice(self.norm_scratch),
-                               nl_factor, lr, EPS,
+                               nl_factor, lr, self.optimizer_runtime.eps,
                                ($ng) as u32, ($pitch) as u32, ($stride) as u32, ($len) as u32]
                     }
                     }?;
@@ -3799,10 +3828,13 @@ impl GpuTrainer {
         // 種別は per-step scalar (step_size, denom) と beta1、lookahead lerp の
         // 有無だけで表現する ([`OptimizerKind`])。
         self.step_count += 1;
-        let (step_size, denom) =
-            self.optimizer
-                .step_size_denom(self.step_count, BETA2, N_SMA_THRESHOLD);
-        let beta1 = self.optimizer.beta1();
+        let (step_size, denom) = self.optimizer.step_size_denom_with_beta1(
+            self.step_count,
+            self.optimizer_runtime.beta1,
+            self.optimizer_runtime.beta2,
+            self.optimizer_runtime.n_sma_threshold,
+        );
+        let beta1 = self.optimizer_runtime.beta1;
         // param-group config を copy で取り出す (`Copy`)。後段の uniform_groups は
         // `&mut self.*` を保持するので、loop 内で `self.optim_groups` を参照すると
         // borrow が衝突する。先に局所へ退避して resolve に使う。
@@ -3835,8 +3867,8 @@ impl GpuTrainer {
                             stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
                             args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
                                    slice_mut(self.ft_w_grad), slice_mut(ft_w_h), ft_lr, step_size, denom,
-                                   ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
-                                   FT_OPT_M_SCALE, FT_OPT_V_SCALE, ft_w_n as u32]
+                                   ft_wd, beta1, self.optimizer_runtime.beta2, self.optimizer_runtime.eps, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
+                                   self.numeric_runtime.ft_opt_m_scale, self.numeric_runtime.ft_opt_v_scale, ft_w_n as u32]
                         }
                     }?;
                 } else {
@@ -3848,8 +3880,8 @@ impl GpuTrainer {
                             stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
                             args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
                                    slice_mut(self.ft_w_grad), ft_lr, step_size, denom,
-                                   ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
-                                   FT_OPT_M_SCALE, FT_OPT_V_SCALE, ft_w_n as u32]
+                                   ft_wd, beta1, self.optimizer_runtime.beta2, self.optimizer_runtime.eps, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
+                                   self.numeric_runtime.ft_opt_m_scale, self.numeric_runtime.ft_opt_v_scale, ft_w_n as u32]
                         }
                     }?;
                 }
@@ -3865,7 +3897,7 @@ impl GpuTrainer {
                             stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
                             args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
                                    slice_mut(self.ft_w_grad), slice_mut(ft_w_h), ft_lr, step_size, denom,
-                                   ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
+                                   ft_wd, beta1, self.optimizer_runtime.beta2, self.optimizer_runtime.eps, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
                         }
                     }?;
                 } else {
@@ -3876,8 +3908,8 @@ impl GpuTrainer {
                             kernel: radam_step,
                             stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
                             args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
-                                   slice_mut(self.ft_w_grad), ft_lr, step_size, denom, ft_wd, beta1, BETA2,
-                                   EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
+                                   slice_mut(self.ft_w_grad), ft_lr, step_size, denom, ft_wd, beta1, self.optimizer_runtime.beta2,
+                                   self.optimizer_runtime.eps, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
                         }
                     }?;
                 }
@@ -3893,6 +3925,7 @@ impl GpuTrainer {
         // 固定長 array、任意の psqt は Option で chain し、per-step のヒープ確保を避ける。
         let psqt_enabled = self.psqt.is_some();
         let psqt_n = self.feature_set.train_ft_in() * self.num_buckets;
+        let quant_clamp_abs = self.numeric_runtime.quant_weight_clamp_abs;
         let mut uniform_groups: [UniformOptimGroup<'_>; 9] = [
             UniformOptimGroup {
                 label: "ft_b",
@@ -3915,8 +3948,8 @@ impl GpuTrainer {
                 grad: &mut self.l1_w_grad,
                 slow: &mut self.l1_w_slow,
                 n: l1_w_n,
-                clamp_min: W_CLAMP_QUANT_MIN,
-                clamp_max: W_CLAMP_QUANT_MAX,
+                clamp_min: -quant_clamp_abs,
+                clamp_max: quant_clamp_abs,
             },
             UniformOptimGroup {
                 label: "l1_b",
@@ -3927,8 +3960,8 @@ impl GpuTrainer {
                 grad: &mut self.l1_b_grad,
                 slow: &mut self.l1_b_slow,
                 n: l1_b_n,
-                clamp_min: W_CLAMP_QUANT_MIN,
-                clamp_max: W_CLAMP_QUANT_MAX,
+                clamp_min: -quant_clamp_abs,
+                clamp_max: quant_clamp_abs,
             },
             UniformOptimGroup {
                 label: "l1f_w",
@@ -3939,8 +3972,8 @@ impl GpuTrainer {
                 grad: &mut self.l1f_w_grad,
                 slow: &mut self.l1f_w_slow,
                 n: l1f_w_n,
-                clamp_min: W_CLAMP_QUANT_MIN,
-                clamp_max: W_CLAMP_QUANT_MAX,
+                clamp_min: -quant_clamp_abs,
+                clamp_max: quant_clamp_abs,
             },
             UniformOptimGroup {
                 label: "l1f_b",
@@ -3951,8 +3984,8 @@ impl GpuTrainer {
                 grad: &mut self.l1f_b_grad,
                 slow: &mut self.l1f_b_slow,
                 n: l1f_b_n,
-                clamp_min: W_CLAMP_QUANT_MIN,
-                clamp_max: W_CLAMP_QUANT_MAX,
+                clamp_min: -quant_clamp_abs,
+                clamp_max: quant_clamp_abs,
             },
             UniformOptimGroup {
                 label: "l2_w",
@@ -3963,8 +3996,8 @@ impl GpuTrainer {
                 grad: &mut self.l2_w_grad,
                 slow: &mut self.l2_w_slow,
                 n: l2_w_n,
-                clamp_min: W_CLAMP_QUANT_MIN,
-                clamp_max: W_CLAMP_QUANT_MAX,
+                clamp_min: -quant_clamp_abs,
+                clamp_max: quant_clamp_abs,
             },
             UniformOptimGroup {
                 label: "l2_b",
@@ -3975,8 +4008,8 @@ impl GpuTrainer {
                 grad: &mut self.l2_b_grad,
                 slow: &mut self.l2_b_slow,
                 n: l2_b_n,
-                clamp_min: W_CLAMP_QUANT_MIN,
-                clamp_max: W_CLAMP_QUANT_MAX,
+                clamp_min: -quant_clamp_abs,
+                clamp_max: quant_clamp_abs,
             },
             UniformOptimGroup {
                 label: "l3_w",
@@ -3987,8 +4020,8 @@ impl GpuTrainer {
                 grad: &mut self.l3_w_grad,
                 slow: &mut self.l3_w_slow,
                 n: l3_w_n,
-                clamp_min: W_CLAMP_QUANT_MIN,
-                clamp_max: W_CLAMP_QUANT_MAX,
+                clamp_min: -quant_clamp_abs,
+                clamp_max: quant_clamp_abs,
             },
             UniformOptimGroup {
                 label: "l3_b",
@@ -4026,7 +4059,10 @@ impl GpuTrainer {
                 .iter()
                 .chain(psqt_group.iter())
                 .map(|g| (g.label, g.kind, g.clamp_min, g.clamp_max))
-                .eq(uniform_optim_group_layout(psqt_enabled)),
+                .eq(uniform_optim_group_layout(
+                    psqt_enabled,
+                    self.numeric_runtime.quant_weight_clamp_abs,
+                )),
             "uniform optim group が uniform_optim_group_layout と不一致 (順序 / kind / clamp のドリフト)"
         );
         for g in uniform_groups.iter_mut().chain(psqt_group.iter_mut()) {
@@ -4042,7 +4078,7 @@ impl GpuTrainer {
                     stream: self.stream, module: self.module, config: cfg_1d(g.n),
                     args: [slice_mut(*g.weight), slice_mut(*g.m), slice_mut(*g.v),
                            slice_mut(*g.grad), lr_g, step_size, denom, wd,
-                           beta1, BETA2, EPS, g.clamp_min, g.clamp_max, g.n as u32]
+                           beta1, self.optimizer_runtime.beta2, self.optimizer_runtime.eps, g.clamp_min, g.clamp_max, g.n as u32]
                 }
             }?;
         }
@@ -4051,7 +4087,11 @@ impl GpuTrainer {
         // 再度書き換えるので、`--ft-fp16` 時は FT weight の lerp も FP16 mirror 同時更新
         // variant を使い、forward 用 `ft_w_h` を lerp 後の最終値で同期し直す (factorizer
         // 有効時は radam と同じ理由で mirror variant を使わず、step 末の fold に委ねる)。
-        if self.optimizer.uses_lookahead() && self.step_count.is_multiple_of(RANGER_K) {
+        if self.optimizer.uses_lookahead()
+            && self
+                .step_count
+                .is_multiple_of(self.optimizer_runtime.lookahead_k)
+        {
             if let Some(mut ft_w_h) = self.ft_w_h.as_mut().filter(|_| !ft_factorize) {
                 unsafe {
                     // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
@@ -4060,7 +4100,7 @@ impl GpuTrainer {
                         kernel: ranger_lookahead_lerp_fp16_mirror,
                         stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
                         args: [slice_mut(self.ft_w), slice_mut(self.ft_w_slow), slice_mut(ft_w_h),
-                               RANGER_ALPHA, ft_w_n as u32]
+                               self.optimizer_runtime.lookahead_alpha, ft_w_n as u32]
                     }
                 }?;
             } else {
@@ -4070,7 +4110,7 @@ impl GpuTrainer {
                     cuda_launch! {
                         kernel: ranger_lookahead_lerp,
                         stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
-                        args: [slice_mut(self.ft_w), slice_mut(self.ft_w_slow), RANGER_ALPHA, ft_w_n as u32]
+                        args: [slice_mut(self.ft_w), slice_mut(self.ft_w_slow), self.optimizer_runtime.lookahead_alpha, ft_w_n as u32]
                     }
                 }?;
             }
@@ -4082,7 +4122,7 @@ impl GpuTrainer {
                     cuda_launch! {
                         kernel: ranger_lookahead_lerp,
                         stream: self.stream, module: self.module, config: cfg_1d(g.n),
-                        args: [slice_mut(*g.weight), slice_mut(*g.slow), RANGER_ALPHA, g.n as u32]
+                        args: [slice_mut(*g.weight), slice_mut(*g.slow), self.optimizer_runtime.lookahead_alpha, g.n as u32]
                     }
                 }?;
             }
@@ -4156,11 +4196,17 @@ mod tests {
             ("l3_w", Dense, q.0, q.1),
             ("l3_b", Bias, none.0, none.1),
         ];
-        assert_eq!(uniform_optim_group_layout(false), expected_no_psqt);
+        assert_eq!(
+            uniform_optim_group_layout(false, W_CLAMP_QUANT_MAX),
+            expected_no_psqt
+        );
 
         let mut expected_psqt = expected_no_psqt.clone();
         expected_psqt.push(("psqt_w", Ft, none.0, none.1));
-        assert_eq!(uniform_optim_group_layout(true), expected_psqt);
+        assert_eq!(
+            uniform_optim_group_layout(true, W_CLAMP_QUANT_MAX),
+            expected_psqt
+        );
     }
 
     /// per-group flag を一つも指定しない (`None`) と、3 group とも weight_decay = 大域値・
