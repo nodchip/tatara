@@ -702,6 +702,66 @@ fn standard_layerstack_runs_one_native_training_step() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn layerstack_raw_checkpoint_applies_resume_states_independently()
+-> Result<(), Box<dyn std::error::Error>> {
+    let context = CudaContext::new(0)?;
+    let options = LayerStackTestOptions::standard();
+    let mut source = create_layerstack_trainer_with_options(&context, true, options)?;
+    let mut batch = BatchData::smoke_dummy(SMOKE_BATCH, options.feature_set);
+    for (row, bucket) in batch.bucket_idx.iter_mut().enumerate() {
+        *bucket = (row % options.num_buckets) as i32;
+    }
+    batch.score.fill(200.0);
+    batch.wdl.fill(0.8);
+    for _ in 0..5 {
+        let _ = source.step(&batch.as_ref(), 1.0e-3, 0.0, SMOKE_LOSS_WRM)?;
+    }
+    let expected = source.raw_checkpoint_state_to_host()?;
+    assert_eq!(expected.0, 5);
+    let path = std::env::temp_dir().join(format!(
+        "tatara-layerstack-selective-resume-{}.ckpt",
+        std::process::id()
+    ));
+    source.save_raw_checkpoint(&path, 17, "selective-state-test", Some(42))?;
+    drop(source);
+
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut reset_optimizer = create_layerstack_trainer_with_options(&context, true, options)?;
+        let metadata = reset_optimizer.load_raw_checkpoint(&path, false, true, false)?;
+        assert_eq!(metadata.0, 17);
+        assert_eq!(metadata.1.as_deref(), Some("selective-state-test"));
+        assert_eq!(metadata.2, Some(42));
+        let state = reset_optimizer.raw_checkpoint_state_to_host()?;
+        assert_eq!(state.0, 0, "global step must reset independently");
+        for ((expected_name, expected_group), (name, group)) in
+            expected.1.iter().zip(state.1.iter())
+        {
+            assert_eq!(expected_name, name);
+            assert!(group.1.iter().all(|&x| x == 0.0), "{name} m not reset");
+            assert!(group.2.iter().all(|&x| x == 0.0), "{name} v not reset");
+            assert_eq!(group.3, expected_group.3, "{name} slow not inherited");
+        }
+        drop(reset_optimizer);
+
+        let mut reset_lookahead = create_layerstack_trainer_with_options(&context, true, options)?;
+        reset_lookahead.load_raw_checkpoint(&path, true, false, true)?;
+        let state = reset_lookahead.raw_checkpoint_state_to_host()?;
+        assert_eq!(state.0, expected.0, "global step not inherited");
+        for ((expected_name, expected_group), (name, group)) in
+            expected.1.iter().zip(state.1.iter())
+        {
+            assert_eq!(expected_name, name);
+            assert_eq!(group.1, expected_group.1, "{name} m not inherited");
+            assert_eq!(group.2, expected_group.2, "{name} v not inherited");
+            assert_eq!(group.3, group.0, "{name} slow not reset to fast weight");
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+#[test]
 #[cfg(feature = "native-cuda")]
 fn standard_layerstack_native_matches_cuda_oxide_after_one_step()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1220,7 +1280,8 @@ fn checkpoint_resume_layerstack_native_matches_cuda_oxide_in_both_directions()
             let mut oxide = create_layerstack_trainer_with_options(&context, false, options)?;
             let mut native = create_layerstack_trainer_with_options(&context, true, options)?;
             for (backend_name, trainer) in [("oxide", &mut oxide), ("native", &mut native)] {
-                let (superbatch, producer, horizon) = trainer.load_raw_checkpoint(&path)?;
+                let (superbatch, producer, horizon) =
+                    trainer.load_raw_checkpoint(&path, true, true, true)?;
                 assert_eq!(superbatch, 17);
                 assert_eq!(producer.as_deref(), Some(source_name));
                 assert_eq!(horizon, Some(42));
@@ -1984,7 +2045,8 @@ fn checkpoint_resume_simple_native_matches_cuda_oxide_in_both_directions()
                 precision,
             )?;
             for (backend_name, trainer) in [("oxide", &mut oxide), ("native", &mut native)] {
-                let (superbatch, producer, horizon) = trainer.load_raw_checkpoint(&path)?;
+                let (superbatch, producer, horizon) =
+                    trainer.load_raw_checkpoint(&path, true, true, true)?;
                 assert_eq!(superbatch, 17);
                 assert_eq!(producer.as_deref(), Some(source_name));
                 assert_eq!(horizon, Some(42));

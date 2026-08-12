@@ -5833,7 +5833,7 @@ fn layerstack_raw_ckpt_roundtrip(with_psqt: bool) -> Result<(), Box<dyn std::err
     saver.save_raw_checkpoint(&path, 3, "roundtrip-test", Some(42))?;
 
     let mut loader = new_trainer()?;
-    let (superbatch, producer, lr_horizon) = loader.load_raw_checkpoint(&path)?;
+    let (superbatch, producer, lr_horizon) = loader.load_raw_checkpoint(&path, true, true, true)?;
     assert_eq!(superbatch, 3);
     assert_eq!(producer.as_deref(), Some("roundtrip-test"));
     assert_eq!(lr_horizon, Some(42));
@@ -5863,6 +5863,36 @@ fn layerstack_raw_ckpt_roundtrip(with_psqt: bool) -> Result<(), Box<dyn std::err
             }
         }
     }
+
+    // Selective restore is genuinely independent: first reset m/v + global
+    // step while inheriting slow, then inherit m/v + global step while
+    // resetting slow to the loaded fast weights.
+    let (saved_step, saved_groups) = saver.raw_checkpoint_state_to_host()?;
+    assert_eq!(saved_step, RANGER_K as u64);
+
+    let mut reset_optimizer = new_trainer()?;
+    reset_optimizer.load_raw_checkpoint(&path, false, true, false)?;
+    let (step, groups) = reset_optimizer.raw_checkpoint_state_to_host()?;
+    assert_eq!(step, 0);
+    for ((saved_name, saved), (name, state)) in saved_groups.iter().zip(groups.iter()) {
+        assert_eq!(saved_name, name);
+        assert!(state.1.iter().all(|&x| x == 0.0), "{name} m not reset");
+        assert!(state.2.iter().all(|&x| x == 0.0), "{name} v not reset");
+        assert_eq!(state.3, saved.3, "{name} slow not inherited");
+    }
+    drop(reset_optimizer);
+
+    let mut reset_lookahead = new_trainer()?;
+    reset_lookahead.load_raw_checkpoint(&path, true, false, true)?;
+    let (step, groups) = reset_lookahead.raw_checkpoint_state_to_host()?;
+    assert_eq!(step, saved_step);
+    for ((saved_name, saved), (name, state)) in saved_groups.iter().zip(groups.iter()) {
+        assert_eq!(saved_name, name);
+        assert_eq!(state.1, saved.1, "{name} m not inherited");
+        assert_eq!(state.2, saved.2, "{name} v not inherited");
+        assert_eq!(state.3, state.0, "{name} slow not reset to fast weight");
+    }
+    drop(reset_lookahead);
 
     // load 後に同条件で書き戻すと file が byte 一致する (`step_count` を含む header
     // と全 group の roundtrip が format 上も無損失である検証)。
@@ -6093,12 +6123,16 @@ fn simple_ft_factorize_resume_rejects_on_off_mismatch() -> Result<(), Box<dyn st
 
     // factorize checkpoint を非 factorize trainer に load → reject。
     assert!(
-        mk(base_id)?.load_raw_checkpoint(&fac_path).is_err(),
+        mk(base_id)?
+            .load_raw_checkpoint(&fac_path, true, true, true)
+            .is_err(),
         "loading a factorized checkpoint into a non-factorized trainer must be rejected"
     );
     // 非 factorize checkpoint を factorize trainer に load → reject。
     assert!(
-        mk(fac_id)?.load_raw_checkpoint(&base_path).is_err(),
+        mk(fac_id)?
+            .load_raw_checkpoint(&base_path, true, true, true)
+            .is_err(),
         "loading a non-factorized checkpoint into a factorized trainer must be rejected"
     );
 

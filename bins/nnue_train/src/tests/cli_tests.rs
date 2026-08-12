@@ -60,6 +60,33 @@ fn non_empty_resume_path_is_preserved() {
 }
 
 #[test]
+fn selective_resume_states_parse_independently() {
+    let cli = Cli::try_parse_from([
+        "nnue-train",
+        "--resume",
+        "checkpoints/run-20.ckpt",
+        "--resume-optimizer-state",
+        "inherit",
+        "--resume-ranger-lookahead-state",
+        "reset",
+        "--resume-global-step-state",
+        "inherit",
+        "--resume-lr-schedule-state",
+        "reset",
+        "layerstack",
+    ])
+    .expect("independent resume states should parse");
+
+    assert_eq!(cli.resume_optimizer_state, Some(ResumeStateArg::Inherit));
+    assert_eq!(
+        cli.resume_ranger_lookahead_state,
+        Some(ResumeStateArg::Reset)
+    );
+    assert_eq!(cli.resume_global_step_state, Some(ResumeStateArg::Inherit));
+    assert_eq!(cli.resume_lr_schedule_state, Some(ResumeStateArg::Reset));
+}
+
+#[test]
 fn whitespace_only_resume_path_is_preserved() {
     let mut cli = Cli::try_parse_from(["nnue-train", "--resume", " ", "layerstack"])
         .expect("whitespace resume should parse");

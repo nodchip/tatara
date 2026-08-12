@@ -342,6 +342,23 @@ fn validate_shared_cli(
     if cli.init_from.is_some() && cli.resume.is_some() {
         return Err("--init-from and --resume are mutually exclusive (--init-from injects weights but resets the optimizer state; --resume preserves it)".into());
     }
+    let selective_resume_states = [
+        cli.resume_optimizer_state,
+        cli.resume_ranger_lookahead_state,
+        cli.resume_global_step_state,
+        cli.resume_lr_schedule_state,
+    ];
+    if cli.resume.is_none() && selective_resume_states.iter().any(Option::is_some) {
+        return Err("--resume-*-state options require --resume".into());
+    }
+    if matches!(cli.resume_lr_schedule_state, Some(ResumeStateArg::Reset))
+        && cli.start_superbatch.is_some()
+    {
+        return Err(
+            "--resume-lr-schedule-state reset restarts at position 1 and cannot be combined with --start-superbatch"
+                .into(),
+        );
+    }
     if cli.superbatches == 0 {
         return Err("--superbatches must be >= 1".into());
     }
@@ -766,11 +783,44 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         trainer.load_layerstack_weights(&weights)?;
         (None, None, None)
     } else if let Some(ckpt) = &cli.resume {
-        let (sb, parent_id, lr_horizon) = trainer.load_raw_checkpoint(ckpt)?;
+        let inherit_optimizer = !matches!(cli.resume_optimizer_state, Some(ResumeStateArg::Reset));
+        let inherit_lookahead = !matches!(
+            cli.resume_ranger_lookahead_state,
+            Some(ResumeStateArg::Reset)
+        );
+        let inherit_global_step =
+            !matches!(cli.resume_global_step_state, Some(ResumeStateArg::Reset));
+        let inherit_lr_schedule =
+            !matches!(cli.resume_lr_schedule_state, Some(ResumeStateArg::Reset));
+        let (sb, parent_id, lr_horizon) = trainer.load_raw_checkpoint(
+            ckpt,
+            inherit_optimizer,
+            inherit_lookahead,
+            inherit_global_step,
+        )?;
         println!(
-            "[train] resuming from {} at superbatch {}",
+            "[train] loading resume checkpoint {} (optimizer={} lookahead={} global_step={} lr_schedule={})",
             ckpt.display(),
-            sb + 1
+            if inherit_optimizer {
+                "inherit"
+            } else {
+                "reset"
+            },
+            if inherit_lookahead {
+                "inherit"
+            } else {
+                "reset"
+            },
+            if inherit_global_step {
+                "inherit"
+            } else {
+                "reset"
+            },
+            if inherit_lr_schedule {
+                "inherit"
+            } else {
+                "reset"
+            },
         );
         if parent_id.is_none() {
             println!(
@@ -779,7 +829,15 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
                 ckpt.display()
             );
         }
-        (Some(sb), parent_id, lr_horizon)
+        (
+            inherit_lr_schedule.then_some(sb),
+            parent_id,
+            if inherit_lr_schedule {
+                lr_horizon
+            } else {
+                None
+            },
+        )
     } else {
         (None, None, None)
     };
@@ -2000,13 +2058,54 @@ pub(crate) fn run_simple_training(
         trainer.load_simple_weights(&weights)?;
         (None, None, None)
     } else if let Some(ckpt) = &cli.resume {
-        let (sb, parent_id, lr_horizon) = trainer.load_raw_checkpoint(ckpt)?;
-        println!(
-            "[train] resuming from {} at superbatch {}",
-            ckpt.display(),
-            sb + 1
+        let inherit_optimizer = !matches!(cli.resume_optimizer_state, Some(ResumeStateArg::Reset));
+        let inherit_lookahead = !matches!(
+            cli.resume_ranger_lookahead_state,
+            Some(ResumeStateArg::Reset)
         );
-        (Some(sb), parent_id, lr_horizon)
+        let inherit_global_step =
+            !matches!(cli.resume_global_step_state, Some(ResumeStateArg::Reset));
+        let inherit_lr_schedule =
+            !matches!(cli.resume_lr_schedule_state, Some(ResumeStateArg::Reset));
+        let (sb, parent_id, lr_horizon) = trainer.load_raw_checkpoint(
+            ckpt,
+            inherit_optimizer,
+            inherit_lookahead,
+            inherit_global_step,
+        )?;
+        println!(
+            "[train] loading resume checkpoint {} (optimizer={} lookahead={} global_step={} lr_schedule={})",
+            ckpt.display(),
+            if inherit_optimizer {
+                "inherit"
+            } else {
+                "reset"
+            },
+            if inherit_lookahead {
+                "inherit"
+            } else {
+                "reset"
+            },
+            if inherit_global_step {
+                "inherit"
+            } else {
+                "reset"
+            },
+            if inherit_lr_schedule {
+                "inherit"
+            } else {
+                "reset"
+            },
+        );
+        (
+            inherit_lr_schedule.then_some(sb),
+            parent_id,
+            if inherit_lr_schedule {
+                lr_horizon
+            } else {
+                None
+            },
+        )
     } else {
         (None, None, None)
     };
@@ -2212,6 +2311,22 @@ mod shared_cli_tests {
         assert!(init_resume_error.contains("--init-from and --resume are mutually exclusive"));
         assert!(init_resume_error.contains("--init-from injects weights"));
         assert!(init_resume_error.contains("--resume preserves it"));
+
+        let without_resume = shared_cli_error(&["--resume-optimizer-state", "reset"], false);
+        assert_eq!(without_resume, "--resume-*-state options require --resume");
+
+        let reset_lr_with_position = shared_cli_error(
+            &[
+                "--resume",
+                "state.ckpt",
+                "--resume-lr-schedule-state",
+                "reset",
+                "--start-superbatch",
+                "2",
+            ],
+            false,
+        );
+        assert!(reset_lr_with_position.contains("restarts at position 1"));
     }
 
     #[test]

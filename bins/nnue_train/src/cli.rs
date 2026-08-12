@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{
-    Args, Parser, Subcommand,
+    Args, Parser, Subcommand, ValueEnum,
     builder::{OsStringValueParser, TypedValueParser},
 };
 #[cfg(any(feature = "gpu", test))]
@@ -17,6 +17,13 @@ fn parse_positive_i32(value: &str) -> Result<i32, String> {
         return Err("fv_scale must be greater than zero".to_string());
     }
     Ok(parsed)
+}
+
+/// Controls whether one independently stored raw-checkpoint state is restored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ResumeStateArg {
+    Inherit,
+    Reset,
 }
 
 // ===========================================================================
@@ -259,6 +266,28 @@ pub(crate) struct Cli {
         value_parser = OsStringValueParser::new().map(PathBuf::from)
     )]
     pub(crate) resume: Option<PathBuf>,
+
+    /// Restore or reset Adam-family first/second moments (m/v) from --resume.
+    /// Defaults to inherit when omitted. Valid only with --resume.
+    #[arg(long, global = true, value_enum)]
+    pub(crate) resume_optimizer_state: Option<ResumeStateArg>,
+
+    /// Restore or reset Ranger lookahead slow weights from --resume. Reset
+    /// synchronises slow weights to the loaded fast weights. Defaults to
+    /// inherit when omitted. Valid only with --resume.
+    #[arg(long, global = true, value_enum)]
+    pub(crate) resume_ranger_lookahead_state: Option<ResumeStateArg>,
+
+    /// Restore or reset the optimizer global step counter from --resume.
+    /// Defaults to inherit when omitted. Valid only with --resume.
+    #[arg(long, global = true, value_enum)]
+    pub(crate) resume_global_step_state: Option<ResumeStateArg>,
+
+    /// Continue the saved LR schedule position/horizon or restart the current
+    /// CLI schedule at position 1. Defaults to inherit when omitted. Valid
+    /// only with --resume.
+    #[arg(long, global = true, value_enum)]
+    pub(crate) resume_lr_schedule_state: Option<ResumeStateArg>,
 
     /// Superbatch number to start training from (1-indexed, inclusive). When
     /// omitted: with `--resume`, the checkpoint's superbatch + 1; otherwise 1.

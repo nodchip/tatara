@@ -1416,6 +1416,9 @@ impl GpuTrainer {
     pub(crate) fn load_raw_checkpoint(
         &mut self,
         path: &Path,
+        inherit_optimizer_state: bool,
+        inherit_lookahead_state: bool,
+        inherit_global_step: bool,
     ) -> Result<RawCkptResumeState, Box<dyn std::error::Error>> {
         let ft_out = self.ws.ft_out;
         let topo4 = layerstack_topology(ft_out, self.ws.l1_out, self.ws.l2_out, self.num_buckets);
@@ -1444,19 +1447,43 @@ impl GpuTrainer {
         // 載せ直す (checkpoint は真値 f32、mode 非依存)。
         let (ftw_w, ftw_m, ftw_v, ftw_slow) = &loaded[0];
         self.ft_w = DeviceBuffer::from_host(&self.stream, ftw_w)?;
-        self.ft_w_m =
-            MomentBuf::from_host_f32(&self.stream, ftw_m, self.fp16_opt_state, FT_OPT_M_SCALE)?;
-        self.ft_w_v =
-            MomentBuf::from_host_f32(&self.stream, ftw_v, self.fp16_opt_state, FT_OPT_V_SCALE)?;
-        self.ft_w_slow = DeviceBuffer::from_host(&self.stream, ftw_slow)?;
+        self.ft_w_m = if inherit_optimizer_state {
+            MomentBuf::from_host_f32(&self.stream, ftw_m, self.fp16_opt_state, FT_OPT_M_SCALE)?
+        } else {
+            MomentBuf::zeroed(&self.stream, ftw_w.len(), self.fp16_opt_state)?
+        };
+        self.ft_w_v = if inherit_optimizer_state {
+            MomentBuf::from_host_f32(&self.stream, ftw_v, self.fp16_opt_state, FT_OPT_V_SCALE)?
+        } else {
+            MomentBuf::zeroed(&self.stream, ftw_w.len(), self.fp16_opt_state)?
+        };
+        self.ft_w_slow = DeviceBuffer::from_host(
+            &self.stream,
+            if inherit_lookahead_state {
+                ftw_slow
+            } else {
+                ftw_w
+            },
+        )?;
 
         macro_rules! up {
             ($idx:expr, $w:ident, $m:ident, $v:ident, $slow:ident) => {{
                 let (w, m, v, s) = &loaded[$idx];
                 self.$w = DeviceBuffer::from_host(&self.stream, w)?;
-                self.$m = DeviceBuffer::from_host(&self.stream, m)?;
-                self.$v = DeviceBuffer::from_host(&self.stream, v)?;
-                self.$slow = DeviceBuffer::from_host(&self.stream, s)?;
+                self.$m = if inherit_optimizer_state {
+                    DeviceBuffer::from_host(&self.stream, m)?
+                } else {
+                    DeviceBuffer::<f32>::zeroed(&self.stream, w.len())?
+                };
+                self.$v = if inherit_optimizer_state {
+                    DeviceBuffer::from_host(&self.stream, v)?
+                } else {
+                    DeviceBuffer::<f32>::zeroed(&self.stream, w.len())?
+                };
+                self.$slow = DeviceBuffer::from_host(
+                    &self.stream,
+                    if inherit_lookahead_state { s } else { w },
+                )?;
             }};
         }
         up!(1, ft_b, ft_b_m, ft_b_v, ft_b_slow);
@@ -1473,12 +1500,31 @@ impl GpuTrainer {
         if let Some(psqt) = self.psqt.as_mut() {
             let (w_host, m_host, v_host, slow_host) = &loaded[10];
             psqt.w = DeviceBuffer::from_host(&self.stream, w_host)?;
-            psqt.w_m = DeviceBuffer::from_host(&self.stream, m_host)?;
-            psqt.w_v = DeviceBuffer::from_host(&self.stream, v_host)?;
-            psqt.w_slow = DeviceBuffer::from_host(&self.stream, slow_host)?;
+            psqt.w_m = if inherit_optimizer_state {
+                DeviceBuffer::from_host(&self.stream, m_host)?
+            } else {
+                DeviceBuffer::<f32>::zeroed(&self.stream, w_host.len())?
+            };
+            psqt.w_v = if inherit_optimizer_state {
+                DeviceBuffer::from_host(&self.stream, v_host)?
+            } else {
+                DeviceBuffer::<f32>::zeroed(&self.stream, w_host.len())?
+            };
+            psqt.w_slow = DeviceBuffer::from_host(
+                &self.stream,
+                if inherit_lookahead_state {
+                    slow_host
+                } else {
+                    w_host
+                },
+            )?;
         }
 
-        self.step_count = header.step_count;
+        self.step_count = if inherit_global_step {
+            header.step_count
+        } else {
+            0
+        };
         Ok((header.superbatch, header.producer_run_id, header.lr_horizon))
     }
 
