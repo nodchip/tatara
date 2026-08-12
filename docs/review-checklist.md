@@ -2,8 +2,8 @@
 
 PR / branch のレビュアー (人 / AI 双方) が **コメント・ドキュメント・ファイル
 命名の冗長性と適切性** を機械的に検出するための checklist。コード logic /
-correctness のレビューは別 (これは `scripts/local-ci.sh` の fmt / clippy /
-test で担う)。
+correctness のレビューは別 (本番経路は `scripts/local-ci.sh` の fmt / clippy /
+test、任意のcuda-oxide parityは`scripts/cuda-oxide-parity-ci.sh`で担う)。
 
 ルールの prevention 側 (書く前に止める) は [CLAUDE.md](../CLAUDE.md) の
 「コードコメント規約」「ドキュメント規約」を参照。本 checklist は detection
@@ -267,7 +267,7 @@ version field 参照は false positive。
 
 ## 5. レビューフロー
 
-1. `bash scripts/local-ci.sh` PASS を前提
+1. `bash scripts/local-ci.sh` の `PASS (native-cuda-host production CI)` を前提
 2. 本 checklist の 1.x (禁止語彙 grep) を実行 → 0 件
 3. 本 checklist の 2.x / 3.x / 4.x を目視 + grep
 4. ヒットがあれば PR コメントで指摘、CLAUDE.md の該当規約をリンク

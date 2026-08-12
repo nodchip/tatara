@@ -85,9 +85,10 @@ device 側の実体は tile / FP16 / sorted などの variant を持つ
 
 ## ベンチ手法
 
-数値同等性テストを持つ kernel は、CPU reference 実装との照合が
-`scripts/local-ci.sh` の release build test 経由で常時検証される (対象 kernel
-は `gpu_cpu_equivalence_tests` を参照)。
+数値同等性テストを持つnative CUDA kernelは、CPU reference実装との照合が
+`scripts/local-ci.sh`のrelease test経由で常時検証される。cuda-oxide版との
+backend parityは任意の`scripts/cuda-oxide-parity-ci.sh`で検査する (対象kernelは
+`gpu_cpu_equivalence_tests`を参照)。
 
 absolute throughput は単一 kernel の micro-bench より、学習 step 全体での
 throughput (`bins/nnue_train` の pos/s ログ) で測る。単一 kernel を小さい

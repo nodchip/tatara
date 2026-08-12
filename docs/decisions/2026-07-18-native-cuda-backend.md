@@ -42,8 +42,9 @@ Driver APIのportable runtimeを独立して整備し、kernel coverageの完成
 - CUDA C++とRustの二言語を保守し、kernel ABIの一致をtestで固定する必要がある。
   「launch する全symbolがsource exportにある」検査はsource走査だけで動くが、
   「全source exportがfatbinから解決できる」最終検査はCUDA driverを要するため、
-  GitHub-hosted runnerでは走らず`scripts/local-ci.sh` / `scripts/check-native-cuda-parity.sh`
-  をローカルGPUで実行して初めて確認できる。
+  GitHub-hosted runnerでは走らず、本番native経路は`scripts/local-ci.sh`、
+  cuda-oxideとの比較は任意の`scripts/cuda-oxide-parity-ci.sh`をローカルGPUで
+  実行して確認する。
 - backend parityの契約は各演算の許容誤差内での数値一致であり、異なるGPU世代を跨ぐ
   bit一致ではない。同一GPU上のhost runtime比較では追加の強い回帰検査としてbit fingerprintも使う。
 - CUDA C++化だけでは高速化を保証しない。既存throughputを維持することを移植時の基準とし、

@@ -131,6 +131,19 @@ For building the kernels and running the smoke test, see
 [docs/setup.md](docs/setup.md); for how to run training, see
 [docs/training-quickstart.md](docs/training-quickstart.md).
 
+The required local production check uses only `native-cuda-host`:
+
+```sh
+bash scripts/local-ci.sh
+```
+
+The cuda-oxide kernel build and native-backend parity check are supplemental
+and can be run on a configured Linux / WSL host:
+
+```sh
+bash scripts/cuda-oxide-parity-ci.sh
+```
+
 ## Documentation
 
 - [Setup guide](docs/setup.md) — per-OS guidance, native CUDA / cuda-oxide build
