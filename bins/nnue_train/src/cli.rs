@@ -644,6 +644,7 @@ pub(crate) struct Cli {
 
 impl Cli {
     /// Treat an empty resume path as an omitted compatibility option.
+    #[cfg(any(feature = "gpu", test))]
     pub(crate) fn normalize_empty_resume(&mut self) {
         if self
             .resume
@@ -689,6 +690,7 @@ pub(crate) enum OutputFormatArg {
 }
 
 impl OutputFormatArg {
+    #[cfg(any(feature = "gpu", test))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Tatara => "tatara",
@@ -697,6 +699,7 @@ impl OutputFormatArg {
         }
     }
 
+    #[cfg(feature = "gpu")]
     pub(crate) fn training_format(self, eval_scale: f32) -> nnue_train::trainer::OutputFormat {
         match self {
             Self::Tatara => nnue_train::trainer::OutputFormat::Tatara,

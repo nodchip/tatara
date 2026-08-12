@@ -2359,6 +2359,11 @@ mod shared_cli_tests {
             let shared = validate_shared_cli(&parse(&["--optimizer", arg]), false, false)
                 .expect("valid shared CLI");
             assert_eq!(shared.optimizer, expected, "--optimizer {arg}");
+            assert_eq!(
+                shared.optimizer_runtime,
+                OptimizerRuntime::for_kind(expected),
+                "--optimizer {arg} runtime defaults"
+            );
         }
     }
 
