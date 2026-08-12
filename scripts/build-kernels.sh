@@ -48,9 +48,10 @@ if [[ -z "$oxide_backend_override" ]]; then
   fi
 fi
 
-# CUDA_OXIDE_TARGET が既に設定済みならそれを尊重する (local-ci.sh 等の呼び出し
-# 元が export してくる)。未設定のときだけ GPU の compute capability (例: "8.6")
-# を取得し、sub-Ampere (sm < 80) の場合に限り自動設定する。
+# CUDA_OXIDE_TARGET が既に設定済みならそれを尊重する
+# (`cuda-oxide-parity-ci.sh`等の呼び出し元がexportしてくる)。未設定のときだけ
+# GPUのcompute capability (例: "8.6")を取得し、sub-Ampere (sm < 80)の場合に
+# 限り自動設定する。
 if [ -n "${CUDA_OXIDE_TARGET:-}" ]; then
   echo "[build-kernels] CUDA_OXIDE_TARGET=$CUDA_OXIDE_TARGET (既設の環境変数) でビルド"
 else

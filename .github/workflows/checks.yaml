@@ -47,8 +47,9 @@ jobs:
       # 必要とする crate 一式。`#[kernel]` macro 展開で `cuda_host::CudaKernel` が
       # 要求され、transitive な cuda-bindings build script が `cuda.h` を必要と
       # するため GitHub-hosted runner では build できない。新しい GPU 依存 crate
-      # を追加するときも --exclude を更新すること (CPU full check は
-      # `scripts/local-ci.sh` で別途回す)。
+      # を追加するときも --exclude を更新すること。本番GPU経路は
+      # `scripts/local-ci.sh`、cuda-oxide parityは任意の
+      # `scripts/cuda-oxide-parity-ci.sh` で別途回す。
       - name: cargo clippy
         if: steps.ws.outputs.empty == 'false'
         run: |

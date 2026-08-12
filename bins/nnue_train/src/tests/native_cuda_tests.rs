@@ -77,10 +77,10 @@ fn cuda_launch_symbols(source: &str) -> std::collections::BTreeSet<String> {
                 proc_macro2::TokenTree::Ident(ident),
                 proc_macro2::TokenTree::Group(group),
             ] = window
+                && ident == "cfg"
+                && group.delimiter() == proc_macro2::Delimiter::Parenthesis
             {
-                if ident == "cfg" && group.delimiter() == proc_macro2::Delimiter::Parenthesis {
-                    return eval_predicate_group(group.stream()) == Tri::False;
-                }
+                return eval_predicate_group(group.stream()) == Tri::False;
             }
         }
         false
@@ -181,13 +181,12 @@ fn cuda_launch_symbols(source: &str) -> std::collections::BTreeSet<String> {
             }
             match token {
                 proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '#' => {
-                    if let Some(proc_macro2::TokenTree::Group(group)) = tokens.peek() {
-                        if group.delimiter() == proc_macro2::Delimiter::Bracket
-                            && attribute_marks_test_only(group.stream())
-                        {
-                            skip_next_item_body = true;
-                            tokens.next();
-                        }
+                    if let Some(proc_macro2::TokenTree::Group(group)) = tokens.peek()
+                        && group.delimiter() == proc_macro2::Delimiter::Bracket
+                        && attribute_marks_test_only(group.stream())
+                    {
+                        skip_next_item_body = true;
+                        tokens.next();
                     }
                 }
                 proc_macro2::TokenTree::Ident(ident) if ident == "cuda_launch" => {

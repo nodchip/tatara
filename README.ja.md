@@ -120,6 +120,19 @@ native CUDA C++ の build command、cuda-oxide のセットアップ、OS 別の
 kernel のビルドと smoke test は [docs/setup.ja.md](docs/setup.ja.md)、学習の回し方は
 [docs/training-quickstart.ja.md](docs/training-quickstart.ja.md) を参照。
 
+本番必須のlocal checkは`native-cuda-host`だけを使用する:
+
+```sh
+bash scripts/local-ci.sh
+```
+
+cuda-oxide kernel buildとnative backend parityは補助検査であり、セットアップ済みの
+Linux / WSL環境で任意に実行する:
+
+```sh
+bash scripts/cuda-oxide-parity-ci.sh
+```
+
 ## ドキュメント
 
 - [Setup guide](docs/setup.ja.md) — OS 別の案内、native CUDA / cuda-oxide の build

@@ -51,8 +51,8 @@ fail-fast する。cache の修復は setup 側だけが行い、build 側は ca
 書き換えない。理由: pin bump は `Cargo.lock` の更新だけで起こりうる
 (誰も `~/.cargo/cuda-oxide/` に触れなくても、pull した瞬間に CLI・cache が
 両方とも古い pin のまま取り残される)ため、build を叩く経路(ローカルの
-`bash scripts/build-kernels.sh` も `scripts/local-ci.sh` 経由の CI も)で
-乖離を検知できないと、意味不明な codegen エラーとしてしか気づけない。
+`bash scripts/build-kernels.sh`も任意の`scripts/cuda-oxide-parity-ci.sh`も)で
+乖離を検知できないと、意味不明なcodegen errorとしてしか気づけない。
 
 ## Consequences
 

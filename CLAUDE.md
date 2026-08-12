@@ -3,27 +3,32 @@
 ## CI 規約 (PR push 前必須)
 
 PR 作成 / `git push` の前に `bash scripts/local-ci.sh` を必ず走らせ、exit 0
-(`PASS` 表示) を確認する。4 step (fmt / clippy / kernel build / test) が **全
-crate (GPU 依存含む) で pass** しない限り push 禁止。
+(`PASS (native-cuda-host production CI)` 表示) を確認する。この必須 CI は本番
+trainer と同じ `native-cuda-host` feature だけを使い、cuda-oxide の導入状態や
+codegen backend cache には依存しない。
 
 ```bash
 bash scripts/local-ci.sh
 ```
 
-`.github/workflows/checks.yaml` は GitHub-hosted runner に CUDA / LLVM が無いため
+`.github/workflows/checks.yaml` は GitHub-hosted runner に CUDA Toolkit が無いため
 GPU 依存 crate (`gpu-runtime` / `progress-kpabs-train` / `nnue-trainer`) を
-clippy / test の workspace から exclude しているが、**本機 (CUDA + LLVM 22
-install 済) では exclude なし全 crate check を必須**とする。CI が green でも
-local check を skip することは規約違反 (CI が見えない領域に未検出 lint /
-test fail が溜まる)。
+clippy / test の workspace から exclude している。本番変更のGPU検査は、CUDAと
+NVCCを持つ開発機で `scripts/local-ci.sh` を実行して補う。GitHub CIがgreenでも
+このlocal checkをskipしてはならない。
 
 `scripts/local-ci.sh` の test step は `--release` で実行する。`nnue-trainer` の
 GPU 数値同等性テスト (`gpu_cpu_equivalence_tests::*`) は debug build の f32 fma
 off で tolerance を満たさず fail するが、release では本番経路と同じ codegen に
-なって pass する。kernel build step (`scripts/build-kernels.sh`) は kernel
-source と artifact の silent 不整合を防ぐためのもので、cargo-oxide が build の
-たびに bin の main.rs を touch して再 codegen を強制するため、warm cache でも
-全体で ~40s 掛かる (kernel build + 後続 test の bin 再ビルド分)。
+なってpassする。
+
+cuda-oxideのRust device kernel、生成artifact、native CUDA C++ backendとのparityは
+次の補助CIで確認できるが、production acceptanceおよびpushの必須条件にはしない。
+cuda-oxideに関係する変更では、対応環境が利用できる場合に実行する。
+
+```bash
+bash scripts/cuda-oxide-parity-ci.sh
+```
 
 ## rust-version (MSRV) 規約
 
