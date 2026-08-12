@@ -29,6 +29,6 @@ pub use header::{DEFAULT_FV_SCALE, DEFAULT_QA, DEFAULT_QB, HEADER_BYTES, NET_ID_
 pub use layerstack_weights::LayerStackWeights;
 pub use simple_weights::{SimpleActivation, SimpleId, SimpleWeights};
 pub use yaneuraou::{
-    TANUKI_SFNNWOP1536_LAYER_STACKS, YANEURAOU_LAYER_STACKS, save_tanuki_sfnnwop1536,
-    save_yaneuraou,
+    TANUKI_SFNNWOP1536_LAYER_STACKS, YANEURAOU_LAYER_STACKS, is_tanuki_sfnnwop1536_header,
+    load_tanuki_sfnnwop1536, save_tanuki_sfnnwop1536, save_yaneuraou,
 };

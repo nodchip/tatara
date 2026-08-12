@@ -19,7 +19,7 @@
 |---|---|---|---:|
 | 教師データ PSV | `PackedSfenValue` × N (40 bytes 固定 / 局面) | `--data` で渡す | 数百 GB |
 | progress 係数 | `progress.bin` (f64 LE、玉 81 マス × KP-abs 駒入力 1548 = `1_003_104` bytes 固定) | LayerStack の `progress8kpabs` mode で `--progress-coeff` に渡す。`kingrank9` と simple では不要 | 1.0 MB |
-| (任意) pretrained NNUE | 量子化 `.bin` (`save_quantised` 形式) | `--init-from` で weight 注入 (optimizer は reset) | — |
+| (任意) pretrained NNUE | Tatara 量子化 `.bin`、または LayerStack の Tanuki SFNNwoP1536 配布形式 | `--init-from` で weight 注入 (optimizer は reset) | — |
 
 ## 例 1: HalfKP NNUE を学習 (simple アーキ)
 
@@ -143,7 +143,9 @@ horizon を持つ LR schedule では、checkpoint に解決済 horizon が保存
 > **`--resume` と `--init-from` の違い**: `--init-from` は量子化 `.bin` から
 > weight だけ注入し optimizer state を **reset** する (fine-tuning / continued
 > training)、`--resume` は raw `.ckpt` から weight + optimizer 両方復元する
-> (真の resume)。両者は排他指定。
+> (真の resume)。両者は排他指定。LayerStack の `--init-from` は header により Tatara
+> checkpoint と Tanuki SFNNwoP1536 配布形式を自動判定する。後者は
+> `halfka-hm-merged`、8 buckets、出力時と同じ `--scale` および層次元を指定する。
 
 ## 出力 artifact の見方
 

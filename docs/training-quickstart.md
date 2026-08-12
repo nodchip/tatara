@@ -22,7 +22,7 @@ examples:
 |---|---|---|---:|
 | Training data PSV | `PackedSfenValue` × N (fixed 40 bytes / position) | Passed via `--data` | Hundreds of GB |
 | progress coefficients | `progress.bin` (f64 LE; 81 king squares × 1548 KP-abs piece inputs = fixed `1_003_104` bytes) | Passed via `--progress-coeff` for LayerStack `progress8kpabs` mode. Not used by `kingrank9` or `simple` | 1.0 MB |
-| (optional) pretrained NNUE | quantised `.bin` (`save_quantised` format) | Injects weights via `--init-from` (the optimizer is reset) | — |
+| (optional) pretrained NNUE | Tatara quantised `.bin`, or the LayerStack Tanuki SFNNwoP1536 distribution format | Injects weights via `--init-from` (the optimizer is reset) | — |
 
 ## Example 1: Training a HalfKP NNUE (simple architecture)
 
@@ -161,6 +161,9 @@ precedence rules.
 > only the weights from a quantised `.bin` and **resets** the optimizer state
 > (fine-tuning / continued training); `--resume` restores both weights and
 > optimizer from a raw `.ckpt` (a true resume). The two are mutually exclusive.
+> LayerStack `--init-from` detects Tatara checkpoints and Tanuki SFNNwoP1536
+> distribution files from the header. The latter requires `halfka-hm-merged`,
+> eight buckets, and the same `--scale` and layer dimensions used for export.
 
 ## Reading the output artifacts
 

@@ -49,6 +49,39 @@ fn numeric_runtime(cli: &Cli) -> Result<crate::arch::NumericRuntime, Box<dyn std
     .map_err(Into::into)
 }
 
+#[cfg(feature = "gpu")]
+fn load_layerstack_init_file(
+    path: &Path,
+    feature_set: FeatureSetSpec,
+    layerstack: &LayerstackArgs,
+    eval_scale: f32,
+) -> std::io::Result<LayerStackWeights> {
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let prefix = std::io::BufRead::fill_buf(&mut reader)?;
+    if nnue_format::is_tanuki_sfnnwop1536_header(prefix) {
+        println!("[train] detected Tanuki SFNNwoP1536 pretrained weights");
+        nnue_format::load_tanuki_sfnnwop1536(
+            &mut reader,
+            feature_set,
+            layerstack.ft_out,
+            layerstack.l1,
+            layerstack.l2,
+            layerstack.num_buckets,
+            eval_scale,
+        )
+    } else {
+        LayerStackWeights::load_quantised_with_psqt(
+            &mut reader,
+            feature_set,
+            layerstack.ft_out,
+            layerstack.l1,
+            layerstack.l2,
+            layerstack.num_buckets,
+            layerstack.psqt,
+        )
+    }
+}
+
 #[cfg(any(feature = "gpu", test))]
 // kernel の per-bucket backward 容量 (arch.rs) が正典。値の乖離を防ぐため再輸出する。
 const MAX_LAYERSTACK_BUCKETS: usize = crate::arch::MAX_SUPPORTED_NUM_BUCKETS;
@@ -627,16 +660,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             .init_from
             .as_ref()
             .ok_or("--threat-norm-dump requires --init-from")?;
-        let mut reader = std::io::BufReader::new(std::fs::File::open(init)?);
-        let weights = LayerStackWeights::load_quantised_with_psqt(
-            &mut reader,
-            feature_set,
-            layerstack.ft_out,
-            layerstack.l1,
-            layerstack.l2,
-            layerstack.num_buckets,
-            layerstack.psqt,
-        )?;
+        let weights = load_layerstack_init_file(init, feature_set, layerstack, cli.scale)?;
         crate::threat_ablate::norm_dump(&weights, layerstack.ft_out);
         return Ok(());
     }
@@ -805,16 +829,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             "[train] injecting pretrained weights from {} (optimizer state reset)",
             init.display()
         );
-        let mut reader = std::io::BufReader::new(std::fs::File::open(init)?);
-        let mut weights = LayerStackWeights::load_quantised_with_psqt(
-            &mut reader,
-            feature_set,
-            layerstack.ft_out,
-            layerstack.l1,
-            layerstack.l2,
-            layerstack.num_buckets,
-            layerstack.psqt,
-        )?;
+        let mut weights = load_layerstack_init_file(init, feature_set, layerstack, cli.scale)?;
         if let Some(spec) = cli.threat_ablate.as_deref() {
             let stats = crate::threat_ablate::apply(&mut weights, layerstack.ft_out, spec)
                 .map_err(std::io::Error::other)?;

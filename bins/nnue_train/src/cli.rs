@@ -227,7 +227,9 @@ pub(crate) struct Cli {
     pub(crate) score_clamp_abs: Option<i16>,
 
     /// Inject weights from a quantised NNUE binary before training starts
-    /// (pretrained start). The optimizer state (m/v/slow/step) is
+    /// (pretrained start). LayerStack accepts Tatara checkpoints and the exact
+    /// Tanuki SFNNwoP1536 evaluation format, selected from the file header. The
+    /// optimizer state (m/v/slow/step) is
     /// **reset** — use `--resume` for a true resume (`--init-from` and
     /// `--resume` are mutually exclusive).
     #[arg(long, global = true)]
