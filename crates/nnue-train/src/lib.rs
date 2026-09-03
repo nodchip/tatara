@@ -37,5 +37,6 @@ pub mod experiment;
 pub mod init;
 pub mod optimizer;
 pub mod schedule;
+pub mod score_calibration;
 pub mod trainer;
 pub mod validation;

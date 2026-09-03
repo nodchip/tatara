@@ -27,6 +27,7 @@ use shogi_features::FeatureSetSpec;
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
 
 use crate::dataloader::{Batch, BucketMode, HcpeFileLoader, PsvFileLoader};
+use crate::score_calibration::ScoreCalibration;
 use crate::trainer::{LossKind, TrainerBackend};
 
 /// held-out validation 1 回分の集計結果。
@@ -74,6 +75,7 @@ impl HeldoutSet {
         batch_size: usize,
         score_drop_abs: Option<i32>,
         score_clamp_abs: Option<i16>,
+        score_calibration: Option<&ScoreCalibration>,
         test_positions: usize,
         bucket_mode: &(impl Copy + Into<BucketMode>),
         feature_set: FeatureSetSpec,
@@ -91,6 +93,7 @@ impl HeldoutSet {
                 batch_size,
                 score_drop_abs,
                 score_clamp_abs,
+                score_calibration,
                 test_positions,
                 bucket_mode,
                 feature_set,
@@ -106,6 +109,7 @@ impl HeldoutSet {
             batch_size,
             score_drop_abs,
             score_clamp_abs,
+            score_calibration,
             test_positions,
             bucket_mode,
             feature_set,
@@ -127,6 +131,7 @@ impl HeldoutSet {
         batch_size: usize,
         score_drop_abs: Option<i32>,
         score_clamp_abs: Option<i16>,
+        score_calibration: Option<&ScoreCalibration>,
         test_positions: usize,
         bucket_mode: &(impl Copy + Into<BucketMode>),
         feature_set: FeatureSetSpec,
@@ -140,6 +145,7 @@ impl HeldoutSet {
             batch_size,
             score_drop_abs,
             score_clamp_abs,
+            score_calibration,
             test_positions,
             bucket_mode,
             feature_set,
@@ -155,6 +161,7 @@ impl HeldoutSet {
         batch_size: usize,
         score_drop_abs: Option<i32>,
         score_clamp_abs: Option<i16>,
+        score_calibration: Option<&ScoreCalibration>,
         test_positions: usize,
         bucket_mode: &(impl Copy + Into<BucketMode>),
         feature_set: FeatureSetSpec,
@@ -172,6 +179,9 @@ impl HeldoutSet {
             let Some(mut board) = next_board(&mut loader)? else {
                 break; // EOF — epoch wrap しない
             };
+            if let Some(calibration) = score_calibration {
+                board.score = calibration.apply(board.score);
+            }
             // 学習側 `PsvEpochReader` と同じ score-drop 近似 (i64 cast で
             // `i16::MIN` の abs overflow を避ける)。
             if let Some(t) = score_drop_abs
@@ -314,6 +324,7 @@ mod tests {
             16,
             None,
             None,
+            None,
             128,
             &BucketMode::KingRank9,
             test_spec(),
@@ -352,6 +363,7 @@ mod tests {
         let set = HeldoutSet::load(
             &path,
             8,
+            None,
             None,
             None,
             8,
@@ -400,6 +412,7 @@ mod tests {
             16,
             None,
             None,
+            None,
             40,
             &progress,
             test_spec(),
@@ -418,6 +431,7 @@ mod tests {
         let set = HeldoutSet::load(
             &sample_psv_path(),
             16,
+            None,
             None,
             None,
             100_000,
@@ -440,6 +454,7 @@ mod tests {
             16,
             None,
             Some(10),
+            None,
             96,
             &progress,
             test_spec(),
@@ -458,6 +473,31 @@ mod tests {
     }
 
     #[test]
+    fn heldout_set_applies_score_calibration() {
+        let progress = ShogiProgressKPAbs;
+        let calibration = ScoreCalibration::from_mapping(&[[i16::MIN, -7], [i16::MAX, -7]])
+            .expect("build calibration");
+        let set = HeldoutSet::load(
+            &sample_psv_path(),
+            16,
+            None,
+            None,
+            Some(&calibration),
+            16,
+            &progress,
+            test_spec(),
+            9,
+        )
+        .expect("load calibrated held-out set");
+
+        assert!(
+            set.batches[0].0.score[..16]
+                .iter()
+                .all(|&score| score == -7.0)
+        );
+    }
+
+    #[test]
     fn heldout_set_load_from_range_reads_tail_records() {
         // sample.psv は 100 records。末尾 30 records (offset 2800..4000) を
         // range 指定して読み、batch_size 16 で test_positions 30 → 切り上げ
@@ -469,6 +509,7 @@ mod tests {
             2800,
             4000,
             16,
+            None,
             None,
             None,
             30,
@@ -492,6 +533,7 @@ mod tests {
             16,
             None,
             None,
+            None,
             16,
             &progress,
             test_spec(),
@@ -511,6 +553,7 @@ mod tests {
         let err = HeldoutSet::load(
             &sample_psv_path(),
             200,
+            None,
             None,
             None,
             200,

@@ -226,6 +226,15 @@ pub(crate) struct Cli {
     #[arg(long, global = true, value_parser = clap::value_parser!(i16).range(1..))]
     pub(crate) score_clamp_abs: Option<i16>,
 
+    /// Apply a fixed train-only teacher-score calibration map while reading PSV
+    /// records. The map is loaded and validated once before training starts.
+    #[arg(long, global = true, requires = "score_calibration_map_sha256")]
+    pub(crate) score_calibration_map: Option<PathBuf>,
+
+    /// Expected lowercase SHA-256 identity of `--score-calibration-map`.
+    #[arg(long, global = true, requires = "score_calibration_map")]
+    pub(crate) score_calibration_map_sha256: Option<String>,
+
     /// Inject weights from a quantised NNUE binary before training starts
     /// (pretrained start). LayerStack accepts Tatara checkpoints and the exact
     /// Tanuki SFNNwoP1536 evaluation format, selected from the file header. The
@@ -1094,4 +1103,42 @@ pub(crate) struct SimpleArgs {
     /// `--tf32` (an opt-in flag with a playing-strength risk).
     #[arg(long)]
     pub(crate) tf32: bool,
+}
+
+#[cfg(test)]
+mod score_calibration_tests {
+    use super::*;
+
+    #[test]
+    fn score_calibration_map_and_identity_are_required_together() {
+        assert!(
+            Cli::try_parse_from([
+                "nnue-train",
+                "--score-calibration-map",
+                "map.json",
+                "layerstack",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nnue-train",
+                "--score-calibration-map-sha256",
+                &"a".repeat(64),
+                "layerstack",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nnue-train",
+                "--score-calibration-map",
+                "map.json",
+                "--score-calibration-map-sha256",
+                &"a".repeat(64),
+                "layerstack",
+            ])
+            .is_ok()
+        );
+    }
 }
