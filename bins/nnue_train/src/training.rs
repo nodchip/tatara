@@ -1,5 +1,7 @@
 #[cfg(feature = "gpu")]
 use std::path::Path;
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
 
 #[cfg(feature = "gpu")]
 use gpu_runtime::CudaContext;
@@ -19,6 +21,8 @@ use nnue_train::optimizer::{OptimizerKind, OptimizerRuntime};
 use nnue_train::schedule::WdlScheduler;
 #[cfg(any(feature = "gpu", test))]
 use nnue_train::schedule::{LrSchedulerEnum, WdlSchedulerEnum};
+#[cfg(feature = "gpu")]
+use nnue_train::score_calibration::ScoreCalibration;
 #[cfg(any(feature = "gpu", test))]
 use nnue_train::trainer::LossKind;
 #[cfg(feature = "gpu")]
@@ -34,6 +38,23 @@ use shogi_features::{FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS};
 use crate::cli::*;
 #[cfg(feature = "gpu")]
 use crate::{trainer_common::PrecisionFlags, trainer_layerstack::*, trainer_simple::*};
+
+#[cfg(feature = "gpu")]
+fn load_score_calibration(
+    cli: &Cli,
+) -> Result<Option<Arc<ScoreCalibration>>, Box<dyn std::error::Error>> {
+    match (
+        cli.score_calibration_map.as_deref(),
+        cli.score_calibration_map_sha256.as_deref(),
+    ) {
+        (Some(path), Some(expected_sha256)) => Ok(Some(Arc::new(ScoreCalibration::load(
+            path,
+            expected_sha256,
+        )?))),
+        (None, None) => Ok(None),
+        _ => Err("score calibration map and SHA-256 must be specified together".into()),
+    }
+}
 
 #[cfg(feature = "gpu")]
 fn numeric_runtime(cli: &Cli) -> Result<crate::arch::NumericRuntime, Box<dyn std::error::Error>> {
@@ -921,6 +942,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
 
     let lr_scheduler = build_lr_scheduler(cli, resumed_lr_horizon)?;
     let wdl_scheduler = build_wdl_scheduler(cli)?;
+    let score_calibration = load_score_calibration(cli)?;
     let cfg = TrainingConfig {
         net_id: cli.net_id.clone(),
         feature_set,
@@ -936,6 +958,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         loss,
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs,
+        score_calibration,
         threads: cli.threads,
         test_data: cli.test_data.clone(),
         test_positions: cli.test_positions,
@@ -968,6 +991,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
                 cfg.batch_size,
                 cfg.score_drop_abs,
                 cfg.score_clamp_abs,
+                cfg.score_calibration.as_deref(),
                 cfg.test_positions,
                 &bucket_mode,
                 cfg.feature_set,
@@ -994,6 +1018,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
                     cfg.batch_size,
                     cfg.score_drop_abs,
                     cfg.score_clamp_abs,
+                    cfg.score_calibration.as_deref(),
                     cfg.test_positions,
                     &bucket_mode,
                     cfg.feature_set,
@@ -1684,6 +1709,7 @@ pub(crate) fn build_experiment_logger(
         wrm_weight_boost_w2: is_wrm.then(|| finite_or_zero(cli.loss_weight_boost_w2)),
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs.map(i32::from),
+        score_calibration_map_sha256: cli.score_calibration_map_sha256.clone(),
         init_from: cli.init_from.as_deref().map(file_basename),
         init_preset: init_summary_for_log(cli),
         // test_data / test_positions / test_tail_positions は対応する CLI フラグ
@@ -1847,6 +1873,7 @@ pub(crate) fn build_experiment_logger_simple(
         wrm_weight_boost_w2: is_wrm.then(|| finite_or_zero(cli.loss_weight_boost_w2)),
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs.map(i32::from),
+        score_calibration_map_sha256: cli.score_calibration_map_sha256.clone(),
         init_from: cli.init_from.as_deref().map(file_basename),
         init_preset: init_summary_for_log(cli),
         test_data: cli.test_data.as_deref().map(file_basename),
@@ -2191,6 +2218,7 @@ pub(crate) fn run_simple_training(
 
     let lr_scheduler = build_lr_scheduler(cli, resumed_lr_horizon)?;
     let wdl_scheduler = build_wdl_scheduler(cli)?;
+    let score_calibration = load_score_calibration(cli)?;
     let cfg = TrainingConfig {
         net_id: cli.net_id.clone(),
         feature_set,
@@ -2206,6 +2234,7 @@ pub(crate) fn run_simple_training(
         loss,
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs,
+        score_calibration,
         threads: cli.threads,
         test_data: cli.test_data.clone(),
         test_positions: cli.test_positions,

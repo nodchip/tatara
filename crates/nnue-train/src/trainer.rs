@@ -51,7 +51,10 @@
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
+
+use crate::score_calibration::ScoreCalibration;
 
 use shogi_features::FeatureSetSpec;
 #[cfg(test)]
@@ -426,6 +429,8 @@ pub struct TrainingConfig {
     /// 単一の上限へ正規化する用途。i16 なのは PSV score の表現域に合わせ、
     /// 消費側の縮小 cast (wrap) を型で不可能にするため。
     pub score_clamp_abs: Option<i16>,
+    /// 読み込み時に教師scoreへ適用する、検証済みの固定単調写像。
+    pub score_calibration: Option<Arc<ScoreCalibration>>,
     /// dataloader の prefetch worker 数 (`--threads`)。`0` は `1` 扱い。
     /// `1` で決定論的逐次 read 相当、`>= 2` で並列パース (1 epoch 内の
     /// position 順序は非決定的になる; [`BucketedPrefetchedLoader`] doc 参照)。
@@ -688,6 +693,7 @@ where
     let mut loader = BucketedPrefetchedLoader::spawn(
         data_path,
         cfg.batch_size,
+        cfg.score_calibration.clone(),
         cfg.score_drop_abs,
         cfg.score_clamp_abs,
         cfg.threads,
@@ -725,6 +731,7 @@ where
                 cfg.batch_size,
                 cfg.score_drop_abs,
                 cfg.score_clamp_abs,
+                cfg.score_calibration.as_deref(),
                 cfg.test_positions,
                 bucket_mode,
                 cfg.feature_set,
@@ -747,6 +754,7 @@ where
                 cfg.batch_size,
                 cfg.score_drop_abs,
                 cfg.score_clamp_abs,
+                cfg.score_calibration.as_deref(),
                 cfg.test_positions,
                 bucket_mode,
                 cfg.feature_set,
@@ -1290,6 +1298,7 @@ mod tests {
             loss: LossKind::Sigmoid { scale: 1.0 / 290.0 },
             score_drop_abs: None,
             score_clamp_abs: None,
+            score_calibration: None,
             threads: 2,
             test_data: None,
             test_positions: 0,
@@ -1502,6 +1511,7 @@ mod tests {
             wrm_weight_boost_w2: None,
             score_drop_abs: None,
             score_clamp_abs: None,
+            score_calibration_map_sha256: None,
             init_from: None,
             init_preset: None,
             test_data: None,

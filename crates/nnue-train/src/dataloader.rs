@@ -31,6 +31,8 @@ use shogi_features::progress_kpabs::ShogiProgressKPAbs;
 use shogi_features::{FeatureSetSpec, kingrank9_bucket_board};
 use shogi_format::{HCPE_RECORD_BYTES, HuffmanCodedPosAndEval, PackedSfenValue, ShogiBoard};
 
+use crate::score_calibration::ScoreCalibration;
+
 /// PSV record size in bytes (`shogi_format::PackedSfenValue` is a fixed
 /// 40-byte struct). Used everywhere we compute byte offsets, validate range
 /// alignment, or convert between record counts and file sizes.
@@ -534,6 +536,7 @@ struct PsvEpochReader {
     start_offset: u64,
     end_offset: u64,
     loader: PsvFileLoader,
+    score_calibration: Option<Arc<ScoreCalibration>>,
     score_drop_abs: Option<i32>,
     score_clamp_abs: Option<i16>,
     /// 直近の reopen 以降に実際に返した (= drop されなかった) position 数。
@@ -550,6 +553,7 @@ impl PsvEpochReader {
         path: &Path,
         start_offset: u64,
         end_offset: u64,
+        score_calibration: Option<Arc<ScoreCalibration>>,
         score_drop_abs: Option<i32>,
         score_clamp_abs: Option<i16>,
     ) -> io::Result<Self> {
@@ -559,6 +563,7 @@ impl PsvEpochReader {
             start_offset,
             end_offset,
             loader,
+            score_calibration,
             score_drop_abs,
             score_clamp_abs,
             pushed_this_epoch: 0,
@@ -572,6 +577,9 @@ impl PsvEpochReader {
         loop {
             match self.loader.next_psv()? {
                 Some(mut psv) => {
+                    if let Some(calibration) = &self.score_calibration {
+                        psv.set_score(calibration.apply(psv.score()));
+                    }
                     // `--score-drop-abs t` 指定時: `|score| >= t` を skip。
                     // i64 cast で `i16::MIN` の abs overflow を避ける。
                     if let Some(t) = self.score_drop_abs
@@ -715,6 +723,7 @@ impl BucketedPrefetchedLoader {
     pub fn spawn(
         path: &Path,
         batch_size: usize,
+        score_calibration: Option<Arc<ScoreCalibration>>,
         score_drop_abs: Option<i32>,
         score_clamp_abs: Option<i16>,
         num_workers: usize,
@@ -742,6 +751,7 @@ impl BucketedPrefetchedLoader {
             path,
             0,
             train_end_offset,
+            score_calibration,
             score_drop_abs,
             score_clamp_abs,
         )?));
@@ -1344,6 +1354,7 @@ mod tests {
             8,
             None,
             None,
+            None,
             1,
             progress,
             test_spec(),
@@ -1367,6 +1378,7 @@ mod tests {
         let mut on = BucketedPrefetchedLoader::spawn(
             &path,
             8,
+            None,
             None,
             None,
             1,
@@ -1509,6 +1521,7 @@ mod tests {
             16,
             None,
             None,
+            None,
             num_workers,
             progress,
             test_spec(),
@@ -1567,6 +1580,7 @@ mod tests {
             16,
             None,
             None,
+            None,
             1,
             BucketMode::KingRank9,
             test_spec(),
@@ -1606,6 +1620,7 @@ mod tests {
             8,
             None,
             None,
+            None,
             0,
             progress,
             test_spec(),
@@ -1635,6 +1650,7 @@ mod tests {
         let mut ok_loader = BucketedPrefetchedLoader::spawn(
             &path,
             8,
+            None,
             Some(32000),
             None,
             2,
@@ -1657,6 +1673,7 @@ mod tests {
         let mut drop_loader = BucketedPrefetchedLoader::spawn(
             &path,
             100,
+            None,
             Some(1),
             None,
             1,
@@ -1682,6 +1699,7 @@ mod tests {
         let mut loader = BucketedPrefetchedLoader::spawn(
             &path,
             8,
+            None,
             None,
             None,
             1,
@@ -1710,7 +1728,7 @@ mod tests {
         // 100 record 分 next() しても barren error にならず (= range 内 wrap が
         // 効いている)、各 record が必ず内容を返すことを確認する。
         let mut reader =
-            PsvEpochReader::new_range(&sample_psv_path(), 2800, 4000, None, None).unwrap();
+            PsvEpochReader::new_range(&sample_psv_path(), 2800, 4000, None, None, None).unwrap();
         for i in 0..100 {
             let _psv = reader
                 .next()
@@ -1737,10 +1755,44 @@ mod tests {
         std::fs::write(&tmp, &bytes).expect("write synthetic psv");
 
         let mut reader =
-            PsvEpochReader::new_range(&tmp, 0, bytes.len() as u64, Some(32000), Some(100)).unwrap();
+            PsvEpochReader::new_range(&tmp, 0, bytes.len() as u64, None, Some(32000), Some(100))
+                .unwrap();
         let got: Vec<i16> = (0..5).map(|_| reader.next().unwrap().score()).collect();
         std::fs::remove_file(&tmp).ok();
         assert_eq!(got, vec![0, 50, -50, 100, -100]);
+    }
+
+    #[test]
+    fn psv_epoch_reader_calibrates_before_drop_and_clamp() {
+        let scores: [i16; 2] = [50, 10];
+        let mut bytes = Vec::with_capacity(scores.len() * 40);
+        for score in scores {
+            let mut record = [0u8; 40];
+            record[32..34].copy_from_slice(&score.to_le_bytes());
+            bytes.extend_from_slice(&record);
+        }
+        let tmp = std::env::temp_dir().join(format!(
+            "nnue-train-calibration-order-{}.psv",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, &bytes).expect("write synthetic psv");
+        let calibration = Arc::new(
+            ScoreCalibration::from_mapping(&[[0, 0], [100, 1000]]).expect("build calibration"),
+        );
+
+        let mut reader = PsvEpochReader::new_range(
+            &tmp,
+            0,
+            bytes.len() as u64,
+            Some(calibration),
+            Some(400),
+            Some(80),
+        )
+        .expect("open calibrated reader");
+        let score = reader.next().expect("one calibrated position").score();
+        std::fs::remove_file(&tmp).ok();
+
+        assert_eq!(score, 80);
     }
 
     #[test]
@@ -1754,6 +1806,7 @@ mod tests {
         let mut loader = BucketedPrefetchedLoader::spawn(
             &tmp,
             8,
+            None,
             None,
             None,
             1,
