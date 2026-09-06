@@ -431,9 +431,13 @@ pub struct TrainingConfig {
     pub score_clamp_abs: Option<i16>,
     /// 読み込み時に教師scoreへ適用する、検証済みの固定単調写像。
     pub score_calibration: Option<Arc<ScoreCalibration>>,
+    /// Seeded block permutation with deterministic parallel batch delivery.
+    /// Each invocation starts at epoch 0, including optimizer resumes; this
+    /// does not restore the previous invocation's data cursor.
+    pub data_order_seed: Option<u64>,
     /// dataloader の prefetch worker 数 (`--threads`)。`0` は `1` 扱い。
     /// `1` で決定論的逐次 read 相当、`>= 2` で並列パース (1 epoch 内の
-    /// position 順序は非決定的になる; [`BucketedPrefetchedLoader`] doc 参照)。
+    /// position 順序は seed 未指定時のみ非決定的; seeded mode は順序を復元する)。
     pub threads: usize,
     /// `Some` のとき held-out validation 用 PSV / HCPE file。各 superbatch 末に
     /// forward-only 検証を走らせ test_loss / test_accuracy を report する。
@@ -690,7 +694,7 @@ where
         None => file_size,
     };
 
-    let mut loader = BucketedPrefetchedLoader::spawn(
+    let mut loader = BucketedPrefetchedLoader::spawn_with_order(
         data_path,
         cfg.batch_size,
         cfg.score_calibration.clone(),
@@ -703,6 +707,7 @@ where
         cfg.num_buckets,
         train_end_offset,
         cfg.monitor_active_features,
+        cfg.data_order_seed,
     )?;
 
     println!(
@@ -1299,6 +1304,7 @@ mod tests {
             score_drop_abs: None,
             score_clamp_abs: None,
             score_calibration: None,
+            data_order_seed: None,
             threads: 2,
             test_data: None,
             test_positions: 0,
@@ -1512,6 +1518,7 @@ mod tests {
             score_drop_abs: None,
             score_clamp_abs: None,
             score_calibration_map_sha256: None,
+            data_order: None,
             init_from: None,
             init_preset: None,
             test_data: None,

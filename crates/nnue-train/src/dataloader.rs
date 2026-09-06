@@ -21,16 +21,20 @@
 //!   [`BucketedPrefetchedLoader`] (multi-worker + ring-buffer pool + bucket
 //!   同時計算) を提供する
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
 use shogi_features::{FeatureSetSpec, kingrank9_bucket_board};
 use shogi_format::{HCPE_RECORD_BYTES, HuffmanCodedPosAndEval, PackedSfenValue, ShogiBoard};
 
+use crate::data_order::ShuffledPsvReader;
 use crate::score_calibration::ScoreCalibration;
 
 /// PSV record size in bytes (`shogi_format::PackedSfenValue` is a fixed
@@ -506,7 +510,7 @@ impl PrefetchedLoader {
 /// これに達したら無限ループせず error を返す。
 pub const MAX_BARREN_PASSES: u32 = 5;
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize};
 
 static PREFETCH_DEPTH_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 static RUNTIME_MAX_BARREN_PASSES: AtomicU32 = AtomicU32::new(MAX_BARREN_PASSES);
@@ -528,6 +532,20 @@ pub fn configure_runtime(prefetch_depth: Option<usize>, max_barren_passes: u32) 
 ///
 /// `next()` は常に「使える PSV」を返すか barren-error を返す (epoch は無限に
 /// wrap するので「終わり」は無い)。
+enum EpochLoader {
+    Sequential(PsvFileLoader),
+    Shuffled(ShuffledPsvReader<File>),
+}
+
+impl EpochLoader {
+    fn next_psv(&mut self) -> io::Result<Option<PackedSfenValue>> {
+        match self {
+            Self::Sequential(reader) => reader.next_psv(),
+            Self::Shuffled(reader) => reader.next_psv(),
+        }
+    }
+}
+
 struct PsvEpochReader {
     path: PathBuf,
     /// 1 epoch の byte range `[start_offset, end_offset)`。wrap 時に
@@ -535,7 +553,9 @@ struct PsvEpochReader {
     /// 経路では `(0, file_size)` で全体に等しい。
     start_offset: u64,
     end_offset: u64,
-    loader: PsvFileLoader,
+    loader: EpochLoader,
+    order_seed: Option<u64>,
+    epoch: u64,
     score_calibration: Option<Arc<ScoreCalibration>>,
     score_drop_abs: Option<i32>,
     score_clamp_abs: Option<i16>,
@@ -562,13 +582,39 @@ impl PsvEpochReader {
             path: path.to_path_buf(),
             start_offset,
             end_offset,
-            loader,
+            loader: EpochLoader::Sequential(loader),
+            order_seed: None,
+            epoch: 0,
             score_calibration,
             score_drop_abs,
             score_clamp_abs,
             pushed_this_epoch: 0,
             barren_passes: 0,
         })
+    }
+
+    fn with_order(mut self, seed: Option<u64>) -> io::Result<Self> {
+        self.order_seed = seed;
+        self.reopen()?;
+        Ok(self)
+    }
+
+    fn reopen(&mut self) -> io::Result<()> {
+        self.loader = match self.order_seed {
+            Some(seed) => EpochLoader::Shuffled(ShuffledPsvReader::new(
+                File::open(&self.path)?,
+                self.start_offset,
+                self.end_offset,
+                seed,
+                self.epoch,
+            )?),
+            None => EpochLoader::Sequential(PsvFileLoader::new_range(
+                &self.path,
+                self.start_offset,
+                self.end_offset,
+            )?),
+        };
+        Ok(())
     }
 
     /// 次の使える PSV を返す。EOF なら file を開き直す (= 次 epoch)。空 file /
@@ -616,8 +662,11 @@ impl PsvEpochReader {
                         self.barren_passes = 0;
                     }
                     self.pushed_this_epoch = 0;
-                    self.loader =
-                        PsvFileLoader::new_range(&self.path, self.start_offset, self.end_offset)?;
+                    self.epoch = self
+                        .epoch
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("training epoch counter overflow"))?;
+                    self.reopen()?;
                 }
             }
         }
@@ -665,22 +714,23 @@ type BatchSlot = (Batch, Vec<i32>);
 ///   (~21MB) は発生しない。
 /// - **epoch 意味論**: 共有 reader が EOF で file を開き直す (= 次 epoch)、
 ///   `score-drop-abs` skip、`MAX_BARREN_PASSES` ガードは [`PsvEpochReader`] が
-///   担う。ただし **1 epoch 内の position の順序は worker 数 ≥ 2 では非決定的**
-///   (各 worker が `batch_size` 件ずつ排他的に読むため batch 境界の切れ目が
-///   変わる)。training では問題ない (適用される lr/wdl は loop の `batch_idx` で
-///   決まりデータ内容に依らない) が、決定論的順序が要る場合は
-///   `num_workers = 1` を使うこと。
+///   担う。seed 未指定かつ worker 数 ≥ 2 では完成順に batch を渡すため順序は
+///   非決定的。seed 指定時は読み込み順に sequence を付け、並列decode後に復元する。
+///   score に依存した drop が raw/較正間で違う局面を除外すると同一局面比較には
+///   ならないため、公平な対照実験では除外条件も揃える必要がある。
 /// - **error 伝搬**: worker が reader から `io::Error` (主に barren-exhaustion)
 ///   を受けたら shared error slot に格納して exit。main の
-///   [`Self::next_batch`] は全 worker が exit して result channel が閉じたら
-///   error slot を見て伝搬する。
+///   [`Self::next_batch`] は channel close を待たずに error slot を確認する。
 /// - **終了**: main が `BucketedPrefetchedLoader` を drop すると [`Drop`] impl が
 ///   まず result/pool 両 channel endpoint を落として全 worker を unblock させ、
 ///   その後 worker thread を join する (close-then-join、詳細は `Drop` の doc)。
 pub struct BucketedPrefetchedLoader {
     /// 完成 batch (Batch + per-position bucket) を worker → main で渡す。
     /// `Drop` で `.take()` して先に落とすため `Option`。
-    result_rx: Option<mpsc::Receiver<BatchSlot>>,
+    result_rx: Option<mpsc::Receiver<(u64, BatchSlot)>>,
+    ordered: bool,
+    next_sequence: u64,
+    pending: BTreeMap<u64, BatchSlot>,
     /// 消費済み batch buffer を main → worker で返す (ring buffer)。
     /// `Drop` で `.take()` して先に落とすため `Option`。
     pool_tx: Option<mpsc::SyncSender<BatchSlot>>,
@@ -734,6 +784,42 @@ impl BucketedPrefetchedLoader {
         train_end_offset: u64,
         monitor_active: bool,
     ) -> io::Result<Self> {
+        Self::spawn_with_order(
+            path,
+            batch_size,
+            score_calibration,
+            score_drop_abs,
+            score_clamp_abs,
+            num_workers,
+            bucket_mode,
+            feature_set,
+            compute_bucket,
+            num_buckets,
+            train_end_offset,
+            monitor_active,
+            None,
+        )
+    }
+
+    /// Seeded mode permutes records before score transforms and restores batch
+    /// sequence after parallel decoding. The fixed pool bounds the reorder buffer.
+    /// `None` preserves sequential reads and completion-order batch delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_order(
+        path: &Path,
+        batch_size: usize,
+        score_calibration: Option<Arc<ScoreCalibration>>,
+        score_drop_abs: Option<i32>,
+        score_clamp_abs: Option<i16>,
+        num_workers: usize,
+        bucket_mode: impl Into<BucketMode>,
+        feature_set: FeatureSetSpec,
+        compute_bucket: bool,
+        num_buckets: usize,
+        train_end_offset: u64,
+        monitor_active: bool,
+        data_order_seed: Option<u64>,
+    ) -> io::Result<Self> {
         assert!(
             num_buckets >= 1,
             "BucketedPrefetchedLoader requires num_buckets >= 1"
@@ -747,14 +833,18 @@ impl BucketedPrefetchedLoader {
         // が最大 1、main が最大 1。
         let n_slots = prefetch_depth + num_workers + 1;
 
-        let reader = Arc::new(Mutex::new(PsvEpochReader::new_range(
-            path,
-            0,
-            train_end_offset,
-            score_calibration,
-            score_drop_abs,
-            score_clamp_abs,
-        )?));
+        let reader = Arc::new(Mutex::new(
+            PsvEpochReader::new_range(
+                path,
+                0,
+                train_end_offset,
+                score_calibration,
+                score_drop_abs,
+                score_clamp_abs,
+            )?
+            .with_order(data_order_seed)?,
+        ));
+        let sequence_counter = Arc::new(AtomicU64::new(0));
         let err_slot: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
         let active_hist: Option<Arc<Mutex<Vec<u64>>>> = if monitor_active {
             Some(Arc::new(Mutex::new(vec![
@@ -765,7 +855,7 @@ impl BucketedPrefetchedLoader {
             None
         };
 
-        let (result_tx, result_rx) = mpsc::sync_channel::<BatchSlot>(prefetch_depth);
+        let (result_tx, result_rx) = mpsc::sync_channel::<(u64, BatchSlot)>(prefetch_depth);
         let (pool_tx, pool_rx) = mpsc::sync_channel::<BatchSlot>(n_slots);
         for _ in 0..n_slots {
             let slot = (
@@ -785,6 +875,7 @@ impl BucketedPrefetchedLoader {
             let pool_rx = Arc::clone(&pool_rx);
             let result_tx = result_tx.clone();
             let active_hist = active_hist.clone();
+            let sequence_counter = Arc::clone(&sequence_counter);
             let handle = thread::spawn(move || {
                 // 各 worker 専有の生 PSV scratch (iteration をまたいで reuse)。
                 let mut scratch: Vec<PackedSfenValue> = Vec::with_capacity(batch_size);
@@ -808,8 +899,10 @@ impl BucketedPrefetchedLoader {
 
                     // 短い critical section: 共有 reader から batch_size 件を
                     // scratch に詰める (I/O のみ、decode はしない)。
+                    let sequence;
                     {
                         let mut rdr = reader.lock().expect("reader mutex poisoned");
+                        sequence = sequence_counter.fetch_add(1, Ordering::Relaxed);
                         scratch.clear();
                         let mut failed: Option<io::Error> = None;
                         for _ in 0..batch_size {
@@ -885,7 +978,7 @@ impl BucketedPrefetchedLoader {
                     }
 
                     // main へ。受信側が落ちていたら (loader drop) 終了。
-                    if result_tx.send((batch, buckets)).is_err() {
+                    if result_tx.send((sequence, (batch, buckets))).is_err() {
                         break;
                     }
                 }
@@ -898,6 +991,9 @@ impl BucketedPrefetchedLoader {
 
         Ok(Self {
             result_rx: Some(result_rx),
+            ordered: data_order_seed.is_some(),
+            next_sequence: 0,
+            pending: BTreeMap::new(),
             pool_tx: Some(pool_tx),
             err_slot,
             active_hist,
@@ -924,36 +1020,55 @@ impl BucketedPrefetchedLoader {
     ///
     /// 消費後は [`Self::recycle`] で `(batch, buckets)` を返すこと (ring buffer)。
     pub fn next_batch(&mut self) -> io::Result<Option<BatchSlot>> {
-        // 単一 worker でのみ起きる error (max_active 超過等) は、全 worker の exit
-        // = result channel close を待たずに surface する必要がある。生存 worker は
-        // epoch wrap で batch を供給し続け channel が閉じないため、recv 前に
-        // err_slot を確認する (確認漏れ時も channel close 経路が backstop)。
-        if let Some(e) = self
-            .err_slot
-            .lock()
-            .expect("err_slot mutex poisoned")
-            .take()
-        {
-            return Err(e);
-        }
-        match self
-            .result_rx
-            .as_ref()
-            .expect("result_rx present until Drop")
-            .recv()
-        {
-            Ok(slot) => Ok(Some(slot)),
-            Err(_) => {
-                // 全 worker exit → result channel close。残った error を確認。
-                if let Some(e) = self
-                    .err_slot
-                    .lock()
-                    .expect("err_slot mutex poisoned")
-                    .take()
-                {
-                    Err(e)
-                } else {
-                    Ok(None)
+        loop {
+            // A failed worker may own the next sequence while its peers wait
+            // for recycled slots. Do not wait for every sender to disconnect.
+            if let Some(error) = self
+                .err_slot
+                .lock()
+                .expect("err_slot mutex poisoned")
+                .take()
+            {
+                return Err(error);
+            }
+            if self.ordered
+                && let Some(slot) = self.pending.remove(&self.next_sequence)
+            {
+                self.next_sequence += 1;
+                return Ok(Some(slot));
+            }
+            match self
+                .result_rx
+                .as_ref()
+                .expect("result_rx present until Drop")
+                .recv_timeout(Duration::from_millis(100))
+            {
+                Ok((_, slot)) if !self.ordered => return Ok(Some(slot)),
+                Ok((sequence, slot)) => {
+                    if sequence == self.next_sequence {
+                        self.next_sequence += 1;
+                        return Ok(Some(slot));
+                    }
+                    // The fixed slot pool also bounds this reorder buffer.
+                    self.pending.insert(sequence, slot);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Some(error) = self
+                        .err_slot
+                        .lock()
+                        .expect("err_slot mutex poisoned")
+                        .take()
+                    {
+                        return Err(error);
+                    }
+                    return if self.pending.is_empty() {
+                        Ok(None)
+                    } else {
+                        Err(io::Error::other(
+                            "prefetch workers exited with a data-order gap",
+                        ))
+                    };
                 }
             }
         }
@@ -1608,6 +1723,188 @@ mod tests {
     #[test]
     fn bucketed_loader_multi_worker() {
         run_bucketed_smoke(4);
+    }
+
+    fn seeded_batches(seed: u64, workers: usize) -> Vec<(Vec<i32>, Vec<f32>)> {
+        let path = sample_psv_path();
+        let mut loader = BucketedPrefetchedLoader::spawn_with_order(
+            &path,
+            7,
+            None,
+            None,
+            None,
+            workers,
+            BucketMode::KingRank9,
+            test_spec(),
+            true,
+            9,
+            73 * PSV_RECORD_BYTES,
+            false,
+            Some(seed),
+        )
+        .unwrap();
+        let mut observed = Vec::new();
+        // Several epochs, with batches crossing the held-out range boundary.
+        for _ in 0..40 {
+            let (batch, buckets) = loader.next_batch().unwrap().unwrap();
+            observed.push((batch.stm_indices.clone(), batch.score.clone()));
+            loader.recycle((batch, buckets));
+        }
+        observed
+    }
+
+    #[test]
+    fn seeded_parallel_batches_match_single_worker_across_epochs() {
+        let expected = seeded_batches(2026090601, 1);
+        assert_eq!(expected, seeded_batches(2026090601, 4));
+        assert_eq!(expected, seeded_batches(2026090601, 4));
+        assert_ne!(expected, seeded_batches(2026090602, 4));
+    }
+
+    #[test]
+    fn seeded_epoch_reader_excludes_heldout_and_changes_epoch_order() {
+        let path = sample_psv_path();
+        let mut reader = PsvEpochReader::new_range(
+            &path,
+            13 * PSV_RECORD_BYTES,
+            73 * PSV_RECORD_BYTES,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_order(Some(123))
+        .unwrap();
+        let mut original =
+            PsvFileLoader::new_range(&path, 13 * PSV_RECORD_BYTES, 73 * PSV_RECORD_BYTES).unwrap();
+        let mut expected = Vec::new();
+        while let Some(psv) = original.next_psv().unwrap() {
+            expected.push(psv.as_bytes().to_vec());
+        }
+        let first: Vec<_> = (0..60)
+            .map(|_| reader.next().unwrap().as_bytes().to_vec())
+            .collect();
+        let second: Vec<_> = (0..60)
+            .map(|_| reader.next().unwrap().as_bytes().to_vec())
+            .collect();
+        assert_ne!(first, second);
+        expected.sort();
+        for mut epoch in [first, second] {
+            epoch.sort();
+            assert_eq!(epoch, expected);
+        }
+    }
+
+    #[test]
+    fn seeded_raw_and_calibrated_parallel_batches_have_identical_features() {
+        let path = sample_psv_path();
+        let calibration =
+            Arc::new(ScoreCalibration::from_mapping(&[[-32768, -16384], [32767, 16384]]).unwrap());
+        let mut raw = BucketedPrefetchedLoader::spawn_with_order(
+            &path,
+            7,
+            None,
+            None,
+            None,
+            1,
+            BucketMode::KingRank9,
+            test_spec(),
+            true,
+            9,
+            73 * PSV_RECORD_BYTES,
+            false,
+            Some(44),
+        )
+        .unwrap();
+        let mut calibrated = BucketedPrefetchedLoader::spawn_with_order(
+            &path,
+            7,
+            Some(calibration),
+            None,
+            None,
+            4,
+            BucketMode::KingRank9,
+            test_spec(),
+            true,
+            9,
+            73 * PSV_RECORD_BYTES,
+            false,
+            Some(44),
+        )
+        .unwrap();
+        let mut changed_scores = false;
+        for _ in 0..40 {
+            let (a, ab) = raw.next_batch().unwrap().unwrap();
+            let (b, bb) = calibrated.next_batch().unwrap().unwrap();
+            assert_eq!(a.stm_indices, b.stm_indices);
+            assert_eq!(a.nstm_indices, b.nstm_indices);
+            assert_eq!(a.nnz, b.nnz);
+            assert_eq!(a.wdl, b.wdl);
+            assert_eq!(ab, bb);
+            changed_scores |= a.score != b.score;
+            raw.recycle((a, ab));
+            calibrated.recycle((b, bb));
+        }
+        assert!(changed_scores);
+    }
+
+    #[test]
+    fn ordered_receiver_drains_out_of_order_slots() {
+        let (tx, rx) = mpsc::sync_channel(3);
+        for sequence in [2, 0, 1] {
+            tx.send((
+                sequence,
+                (Batch::with_capacity(1, test_spec()), vec![sequence as i32]),
+            ))
+            .unwrap();
+        }
+        drop(tx);
+        let mut loader = BucketedPrefetchedLoader {
+            result_rx: Some(rx),
+            ordered: true,
+            next_sequence: 0,
+            pending: BTreeMap::new(),
+            pool_tx: None,
+            err_slot: Arc::new(Mutex::new(None)),
+            active_hist: None,
+            handles: vec![],
+        };
+        for expected in 0..3 {
+            assert_eq!(loader.next_batch().unwrap().unwrap().1, vec![expected]);
+        }
+        assert!(loader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn ordered_receiver_surfaces_worker_error_without_channel_close() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send((1, (Batch::with_capacity(1, test_spec()), vec![])))
+            .unwrap();
+        let err_slot = Arc::new(Mutex::new(None));
+        let worker_error = Arc::clone(&err_slot);
+        let producer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            *worker_error.lock().unwrap() = Some(io::Error::other("synthetic worker failure"));
+            // Keep a sender alive until the loader closes its receiver.
+            let _ = tx.send((2, (Batch::with_capacity(1, test_spec()), vec![])));
+            let _ = tx.send((3, (Batch::with_capacity(1, test_spec()), vec![])));
+            let _ = tx.send((4, (Batch::with_capacity(1, test_spec()), vec![])));
+        });
+        let mut loader = BucketedPrefetchedLoader {
+            result_rx: Some(rx),
+            ordered: true,
+            next_sequence: 0,
+            pending: BTreeMap::new(),
+            pool_tx: None,
+            err_slot,
+            active_hist: None,
+            handles: vec![producer],
+        };
+        assert_eq!(
+            loader.next_batch().err().unwrap().to_string(),
+            "synthetic worker failure"
+        );
+        drop(loader);
     }
 
     #[test]

@@ -235,6 +235,12 @@ pub(crate) struct Cli {
     #[arg(long, global = true, requires = "score_calibration_map")]
     pub(crate) score_calibration_map_sha256: Option<String>,
 
+    /// Seed for deterministic block-shuffled PSV order, independent of decoder
+    /// thread count. Starts at epoch 0 on every invocation, including --resume;
+    /// this controls data order, not network initialization or GPU determinism.
+    #[arg(long, global = true)]
+    pub(crate) data_order_seed: Option<u64>,
+
     /// Inject weights from a quantised NNUE binary before training starts
     /// (pretrained start). LayerStack accepts Tatara checkpoints and the exact
     /// Tanuki SFNNwoP1536 evaluation format, selected from the file header. The
@@ -1108,6 +1114,31 @@ pub(crate) struct SimpleArgs {
 #[cfg(test)]
 mod score_calibration_tests {
     use super::*;
+
+    #[test]
+    fn data_order_seed_is_optional_unsigned_and_global() {
+        assert_eq!(
+            Cli::try_parse_from(["nnue-train", "layerstack"])
+                .unwrap()
+                .data_order_seed,
+            None
+        );
+        for seed in ["0", "2026090601", "18446744073709551615"] {
+            let cli = Cli::try_parse_from(["nnue-train", "--data-order-seed", seed, "layerstack"])
+                .unwrap();
+            assert_eq!(cli.data_order_seed, Some(seed.parse().unwrap()));
+            assert!(
+                Cli::try_parse_from(["nnue-train", "layerstack", "--data-order-seed", seed])
+                    .is_ok()
+            );
+        }
+        for seed in ["-1", "1.5", "18446744073709551616"] {
+            assert!(
+                Cli::try_parse_from(["nnue-train", "--data-order-seed", seed, "layerstack"])
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn score_calibration_map_and_identity_are_required_together() {

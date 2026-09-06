@@ -28,6 +28,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+/// Applied data-order policy; no dataset paths or contents are included.
+#[derive(Debug, Clone, Serialize)]
+pub struct DataOrderRecord {
+    pub seed: u64,
+    pub algorithm: &'static str,
+    pub block_records: u64,
+    pub initial_epoch: u64,
+    pub cursor_policy: &'static str,
+}
+
+impl DataOrderRecord {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            algorithm: crate::data_order::DATA_ORDER_ALGORITHM,
+            block_records: crate::data_order::DATA_ORDER_BLOCK_RECORDS,
+            initial_epoch: 0,
+            cursor_policy: "restart_each_invocation",
+        }
+    }
+}
+
 /// `nnue-lab` ExperimentJsonV1 と整合する schema 契約 version。producer (本
 /// トレーナー) 自身の version は [`Generator::version`] が別に持つ。
 ///
@@ -186,6 +208,8 @@ pub struct Params {
     /// 読み込み時に適用した固定score較正mapのSHA-256。mapのprivate pathは記録しない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_calibration_map_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_order: Option<DataOrderRecord>,
     /// `--init-from` の入力ファイル basename (pretrained start)。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub init_from: Option<String>,
@@ -658,6 +682,7 @@ mod tests {
             score_drop_abs: None,
             score_clamp_abs: None,
             score_calibration_map_sha256: None,
+            data_order: None,
             init_from: None,
             init_preset: None,
             test_data: None,
@@ -718,6 +743,29 @@ mod tests {
         // date は開始 epoch から ISO 8601 UTC で導出され、初期 last_updated_at と一致。
         assert_eq!(doc.date, format_utc_iso(1_747_000_000));
         assert_eq!(doc.date, doc.last_updated_at);
+    }
+
+    #[test]
+    fn data_order_record_logs_applied_policy_and_is_optional() {
+        let mut params = sample_params();
+        assert!(
+            serde_json::to_value(&params)
+                .unwrap()
+                .get("data_order")
+                .is_none()
+        );
+        params.data_order = Some(DataOrderRecord::new(2026090601));
+        let value = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            value["data_order"],
+            serde_json::json!({
+                "seed": 2026090601u64,
+                "algorithm": "psv-block-shuffle-splitmix64-v1",
+                "block_records": 262144,
+                "initial_epoch": 0,
+                "cursor_policy": "restart_each_invocation"
+            })
+        );
     }
 
     #[test]
