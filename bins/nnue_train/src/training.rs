@@ -959,6 +959,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs,
         score_calibration,
+        data_order_seed: cli.data_order_seed,
         threads: cli.threads,
         test_data: cli.test_data.clone(),
         test_positions: cli.test_positions,
@@ -1710,6 +1711,9 @@ pub(crate) fn build_experiment_logger(
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs.map(i32::from),
         score_calibration_map_sha256: cli.score_calibration_map_sha256.clone(),
+        data_order: cli
+            .data_order_seed
+            .map(nnue_train::experiment::DataOrderRecord::new),
         init_from: cli.init_from.as_deref().map(file_basename),
         init_preset: init_summary_for_log(cli),
         // test_data / test_positions / test_tail_positions は対応する CLI フラグ
@@ -1874,6 +1878,9 @@ pub(crate) fn build_experiment_logger_simple(
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs.map(i32::from),
         score_calibration_map_sha256: cli.score_calibration_map_sha256.clone(),
+        data_order: cli
+            .data_order_seed
+            .map(nnue_train::experiment::DataOrderRecord::new),
         init_from: cli.init_from.as_deref().map(file_basename),
         init_preset: init_summary_for_log(cli),
         test_data: cli.test_data.as_deref().map(file_basename),
@@ -2235,6 +2242,7 @@ pub(crate) fn run_simple_training(
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs,
         score_calibration,
+        data_order_seed: cli.data_order_seed,
         threads: cli.threads,
         test_data: cli.test_data.clone(),
         test_positions: cli.test_positions,
