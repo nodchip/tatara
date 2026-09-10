@@ -1069,30 +1069,56 @@ impl GpuTrainer {
         &mut self,
         w: &LayerStackWeights,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 本経路は companion buffer (`ft_w_m`/`v`/`grad`/`slow`) を base 長で
-        // 再確保するため、factorize 有効 trainer (train 長の `ft_w`) には適用
-        // できない (spec 等値性でも弾かれるが、長さ不変条件をここで閉じる)。
-        if self.feature_set.ft_factorize() {
+        // Quantised files contain coalesced real rows. Virtual rows start at zero,
+        // so loading into a factorized trainer preserves the initial evaluator.
+        let expected_spec = if self.feature_set.ft_factorize() {
+            w.feature_set
+                .with_ft_factorize_mode(self.feature_set.ft_factorize_mode())
+        } else {
+            w.feature_set
+        };
+        if w.feature_set.ft_factorize() || expected_spec != self.feature_set {
             return Err(invalid_data(
-                "load_layerstack_weights does not support an ft-factorize trainer (a \
-                 quantised .bin has no virtual factorizer rows)"
-                    .to_string(),
+                "pretrained feature set differs from trainer".to_string(),
             ));
         }
-        // optimizer companion buffer (`ft_w_m`/`v`/`grad`/`slow`) は trainer の
-        // feature set で確保済。weight の feature set が異なると `ft_w` だけ別長に
-        // なり optimizer step が out-of-bounds になるため、ここで弾く。
-        if w.feature_set != self.feature_set {
-            return Err(invalid_data(format!(
-                "weight feature set '{}' (ft-factorize {}) does not match trainer feature \
-                 set '{}' (ft-factorize {})",
-                w.feature_set.canonical_name(),
-                w.feature_set.ft_factorize(),
-                self.feature_set.canonical_name(),
-                self.feature_set.ft_factorize()
-            )));
+        let ft_out = self.ws.ft_out;
+        let l1_out = self.ws.l1_out;
+        let l2_out = self.ws.l2_out;
+        let l2_in = self.ws.l2_in();
+        let real_ft_n = self.feature_set.ft_in() * ft_out;
+        let shapes = [
+            (w.ft_w.len(), real_ft_n),
+            (w.ft_b.len(), ft_out),
+            (w.l1_w.len(), self.num_buckets * l1_out * ft_out),
+            (w.l1_b.len(), self.num_buckets * l1_out),
+            (w.l1f_w.len(), ft_out * l1_out),
+            (w.l1f_b.len(), l1_out),
+            (w.l2_w.len(), self.num_buckets * l2_out * l2_in),
+            (w.l2_b.len(), self.num_buckets * l2_out),
+            (w.l3_w.len(), self.num_buckets * l2_out),
+            (w.l3_b.len(), self.num_buckets),
+        ];
+        if w.num_buckets != self.num_buckets
+            || shapes.iter().any(|(actual, expected)| actual != expected)
+        {
+            return Err(invalid_data(
+                "pretrained weight dimensions differ from trainer".to_string(),
+            ));
         }
-        self.ft_w = DeviceBuffer::from_host(&self.stream, &w.ft_w)?;
+        match (self.psqt.is_some(), w.psqt_w.as_ref()) {
+            (true, Some(values)) if values.len() == self.feature_set.ft_in() * self.num_buckets => {
+            }
+            (false, None) => {}
+            _ => {
+                return Err(invalid_data(
+                    "pretrained PSQT dimensions differ from trainer".to_string(),
+                ));
+            }
+        }
+        let mut ft_weights = w.ft_w.clone();
+        ft_weights.resize(self.feature_set.train_ft_in() * ft_out, 0.0);
+        self.ft_w = DeviceBuffer::from_host(&self.stream, &ft_weights)?;
         self.ft_b = DeviceBuffer::from_host(&self.stream, &w.ft_b)?;
         self.l1_w = DeviceBuffer::from_host(&self.stream, &w.l1_w)?;
         self.l1_b = DeviceBuffer::from_host(&self.stream, &w.l1_b)?;
@@ -1114,7 +1140,7 @@ impl GpuTrainer {
         let l1_out = self.ws.l1_out;
         let l2_out = self.ws.l2_out;
         let l2_in = self.ws.l2_in();
-        let ft_w_n = self.feature_set.ft_in() * ft_out;
+        let ft_w_n = self.feature_set.train_ft_in() * ft_out;
         let ft_b_n = ft_out;
         let l1_w_n = self.num_buckets * l1_out * ft_out;
         let l1_b_n = self.num_buckets * l1_out;
@@ -1126,7 +1152,7 @@ impl GpuTrainer {
         let l3_b_n = self.num_buckets;
         self.ft_w_m = MomentBuf::zeroed(&self.stream, ft_w_n, self.fp16_opt_state)?;
         self.ft_w_v = MomentBuf::zeroed(&self.stream, ft_w_n, self.fp16_opt_state)?;
-        self.ft_w_slow = DeviceBuffer::from_host(&self.stream, &w.ft_w)?;
+        self.ft_w_slow = DeviceBuffer::from_host(&self.stream, &ft_weights)?;
         self.ft_w_grad = zeros_f32(ft_w_n)?;
         self.ft_b_m = zeros_f32(ft_b_n)?;
         self.ft_b_v = zeros_f32(ft_b_n)?;
@@ -1164,39 +1190,18 @@ impl GpuTrainer {
         self.l3_b_v = zeros_f32(l3_b_n)?;
         self.l3_b_slow = DeviceBuffer::from_host(&self.stream, &w.l3_b)?;
         self.l3_b_grad = zeros_f32(l3_b_n)?;
-        // PSQT (任意): trainer 側で psqt が enabled なら weight 側も `Some` を要求。
-        // load 側で `Some` でも trainer が `None` の組合せ (誤って PSQT 無し trainer に
-        // PSQT 含む weights を入れる) も同じく reject する。
-        match (self.psqt.as_mut(), w.psqt_w.as_ref()) {
-            (Some(psqt), Some(w_psqt)) => {
-                let n = self.feature_set.ft_in() * self.num_buckets;
-                if w_psqt.len() != n {
-                    return Err(invalid_data(format!(
-                        "weight psqt_w length {} != expected {n}",
-                        w_psqt.len()
-                    )));
-                }
-                psqt.w = DeviceBuffer::from_host(&self.stream, w_psqt)?;
-                psqt.w_m = zeros_f32(n)?;
-                psqt.w_v = zeros_f32(n)?;
-                psqt.w_slow = DeviceBuffer::from_host(&self.stream, w_psqt)?;
-                psqt.w_grad = zeros_f32(n)?;
-            }
-            (Some(_), None) => {
-                return Err(invalid_data(
-                    "trainer has PSQT enabled but weights have no psqt_w (use a PSQT-trained .bin)"
-                        .to_string(),
-                ));
-            }
-            (None, Some(_)) => {
-                return Err(invalid_data(
-                    "weights carry psqt_w but trainer has PSQT disabled (rerun with --psqt)"
-                        .to_string(),
-                ));
-            }
-            (None, None) => {}
+        if let (Some(psqt), Some(values)) = (self.psqt.as_mut(), w.psqt_w.as_ref()) {
+            let n = self.feature_set.train_ft_in() * self.num_buckets;
+            let mut weights = values.clone();
+            weights.resize(n, 0.0);
+            psqt.w = DeviceBuffer::from_host(&self.stream, &weights)?;
+            psqt.w_m = zeros_f32(n)?;
+            psqt.w_v = zeros_f32(n)?;
+            psqt.w_slow = DeviceBuffer::from_host(&self.stream, &weights)?;
+            psqt.w_grad = zeros_f32(n)?;
         }
         self.step_count = 0;
+        self.sync_ft_forward_weights()?;
         Ok(())
     }
 

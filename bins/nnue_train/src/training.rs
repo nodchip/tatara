@@ -548,8 +548,8 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
     // 連結でき、両 ON の FT layout は `[base real | threat real | virtual piece-input rows]`。
     // effect bucket は base row 全体を bucket 数倍に展開し、factorizer は共有 mode に応じた
     // piece-input 仮想行 を後ろへ連結する。factorizer は default ON で `--no-ft-factorize` が opt-out。`--init-from` は
-    // factorizer と排他で auto-suppress する (量子化 .bin は仮想行を持たないため
-    // 初期化元にできない)。threat profile は init-from でも保持する (threat row は
+    // 明示 --ft-factorize がない限り auto-suppress する。明示時は量子化 .bin の
+    // 実行を保持し、仮想行を 0 で初期化する。threat profile は init-from でも保持する (threat row は
     // .bin に書かれており初期化できる)。
     let feature_set = match (threat_profile, effect_bucket_config) {
         (Some(profile), None) => {
@@ -568,11 +568,12 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             unreachable!("effect bucket and threat are rejected before spec construction")
         }
     };
+    let init_feature_set = feature_set;
     let feature_set = if cli.ft_factorize_enabled() {
-        if cli.init_from.is_some() {
+        if cli.init_from.is_some() && !cli.ft_factorize {
             println!(
-                "[train] --init-from set → ft-factorizer disabled (a quantised .bin has no \
-                 virtual factorizer rows)"
+                "[train] --init-from set → ft-factorizer disabled; use explicit \
+                 --ft-factorize to initialize virtual rows to zero"
             );
             feature_set
         } else {
@@ -681,7 +682,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             .init_from
             .as_ref()
             .ok_or("--threat-norm-dump requires --init-from")?;
-        let weights = load_layerstack_init_file(init, feature_set, layerstack, cli.scale)?;
+        let weights = load_layerstack_init_file(init, init_feature_set, layerstack, cli.scale)?;
         crate::threat_ablate::norm_dump(&weights, layerstack.ft_out);
         return Ok(());
     }
@@ -850,7 +851,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             "[train] injecting pretrained weights from {} (optimizer state reset)",
             init.display()
         );
-        let mut weights = load_layerstack_init_file(init, feature_set, layerstack, cli.scale)?;
+        let mut weights = load_layerstack_init_file(init, init_feature_set, layerstack, cli.scale)?;
         if let Some(spec) = cli.threat_ablate.as_deref() {
             let stats = crate::threat_ablate::apply(&mut weights, layerstack.ft_out, spec)
                 .map_err(std::io::Error::other)?;

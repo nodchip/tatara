@@ -627,11 +627,11 @@ pub(crate) struct Cli {
     /// reduction), costing a single-digit percentage of training throughput
     /// and zero inference cost.
     ///
-    /// This flag is accepted for explicitness/back-compat but is redundant
-    /// with the default. It is auto-disabled (logged at startup) only by
-    /// `--init-from` (a quantised `.bin` has no virtual rows to initialise
-    /// from); resume across the resulting on/off is rejected (checkpoint
-    /// dimensions differ). On the layerstack trainer it coexists with `--psqt`
+    /// With `--init-from`, factorization is disabled unless this flag is explicit
+    /// on the layerstack trainer. Explicit opt-in preserves the loaded real
+    /// weights and initializes virtual rows to zero. The simple trainer always
+    /// disables factorization with `--init-from`. Resume across on/off is rejected
+    /// because checkpoint dimensions differ. On layerstack it coexists with `--psqt`
     /// (the PSQT shortcut rows share the same fold), `--threat-profile`, and
     /// `--effect-bucket`; the `simple` trainer has no such modifiers, so it
     /// always shares one virtual row per piece input.
@@ -643,8 +643,8 @@ pub(crate) struct Cli {
     pub(crate) ft_factorize: bool,
 
     /// Disable the FT factorizer (it is ON by default; see `--ft-factorize`).
-    /// Use this to train the non-factorized network. Only `--init-from`
-    /// auto-disables it otherwise.
+    /// Use this to train the non-factorized network. `--init-from` also disables
+    /// it by default; layerstack can opt in with explicit `--ft-factorize`.
     #[arg(
         long = "no-ft-factorize",
         global = true,
@@ -672,8 +672,8 @@ impl Cli {
 
     /// FT factorizer の実効 ON/OFF (default ON、`--no-ft-factorize` で OFF)。
     /// `--ft-factorize` は back-compat の明示 ON で、`overrides_with` により
-    /// command-line 上で後勝ちする。`--init-from` との排他は呼び出し側
-    /// (`run_training` / `run_simple_training`) が auto-suppress で解決するため、
+    /// command-line 上で後勝ちする。`--init-from` の default suppression と
+    /// layerstack の明示 opt-in は呼び出し側が解決するため、
     /// ここには含めない (この値は「ユーザーが factorizer を望むか」だけを表す)。
     #[cfg(any(feature = "gpu", test))]
     pub(crate) fn ft_factorize_enabled(&self) -> bool {

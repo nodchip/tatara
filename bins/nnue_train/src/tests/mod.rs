@@ -15,3 +15,6 @@ mod native_bench_schema_tests;
 mod native_cuda_tests;
 #[cfg(test)]
 mod raw_ckpt_format_tests;
+
+#[cfg(all(test, feature = "native-cuda-host"))]
+mod factorized_warm_start_tests;
